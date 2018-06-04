@@ -47,6 +47,28 @@ public:
   }
 };
 
+class TensorHandler {
+  cudnnTensorDescriptor_t dataTensor;
+
+public:
+  TensorHandler(const vector<int> &shape) {
+    assert(CUDNN_STATUS_SUCCESS == cudnnCreateTensorDescriptor(&dataTensor));
+    assert(shape.size() <= 4);
+    int dimA[4] = {1, 1, 1, 1};
+    for (int i = 0; i < shape.size(); ++i)
+      dimA[i] = shape[shape.size() - 1 - i];
+    assert(CUDNN_STATUS_SUCCESS == cudnnSetTensor4dDescriptor(dataTensor, CUDNN_TENSOR_NCHW, CUDNN_DATA_FLOAT, dimA[0], dimA[1], dimA[2], dimA[3]));
+  }
+
+  ~TensorHandler() {
+    assert(CUDNN_STATUS_SUCCESS == cudnnDestroyTensorDescriptor(dataTensor));
+  }
+
+  cudnnTensorDescriptor_t get() const {
+    return dataTensor;
+  }
+};
+
 
 static cudnnHandle_t cudnnHandle;
 static cublasHandle_t cublasHandle;
@@ -56,6 +78,7 @@ static CUstream hStream = NULL;
 template <class T> class Tensor {
   vector<int> shape;
   shared_ptr<DeviceMemory> d_data;
+  shared_ptr<TensorHandler> dataTensor;
 
 public:
 
@@ -76,6 +99,7 @@ public:
   Tensor(const vector<int> &shape, const vector<T> &host = {}): shape(shape) {
     size_t len = count();
     d_data = make_shared<DeviceMemory>(len * sizeof(T));
+    dataTensor = make_shared<TensorHandler>(shape);
 
     if (host.size() > 0)
       assert(CUDA_SUCCESS == cuMemcpyHtoDAsync_v2((CUdeviceptr)d_data->get(), host.data(), len * sizeof(T), hStream));
@@ -84,6 +108,7 @@ public:
   Tensor(const vector<int> &shape, const T val): shape(shape) {
     size_t len = count();
     d_data = make_shared<DeviceMemory>(len * sizeof(T));
+    dataTensor = make_shared<TensorHandler>(shape);
 
     unsigned int ui = (unsigned int&)val;
     assert(CUDA_SUCCESS == cuMemsetD32Async((CUdeviceptr)d_data->get(), ui, len, hStream));
@@ -128,6 +153,7 @@ public:
   Tensor reshape(const vector<int> &shape) const {
     Tensor mat = *this;
     mat.shape = shape;
+    mat.dataTensor = make_shared<TensorHandler>(shape);
     assert(mat.count() == count());
     return mat;
   }
@@ -160,7 +186,7 @@ public:
 
   Tensor incbias(const Tensor<T> &bias, const Tensor<T> &ones) const {
     // self += B * ones'T; -- ones.shape == 1 x batch_size
-    assert(this->shape.size() == 2 && bias.shape.size() == 1 && this->shape[0] == bias.shape[0]);
+    assert(this->shape.size() == 2 && bias.shape.size() == 2 && this->shape[0] == bias.shape[0] && bias.shape[1] == 1);
 
     float alpha = 1.0f;
     cublasSgemm(cublasHandle,
@@ -177,52 +203,36 @@ public:
   Tensor activationForward(cudnnActivationMode_t mode = CUDNN_ACTIVATION_SIGMOID) const {
     float alpha = 1.0f, beta = 0.0f;
 
-    cudnnTensorDescriptor_t dataTensor;
-    assert(CUDNN_STATUS_SUCCESS == cudnnCreateTensorDescriptor(&dataTensor));
-    assert(CUDNN_STATUS_SUCCESS == cudnnSetTensor4dDescriptor(dataTensor, CUDNN_TENSOR_NCHW, CUDNN_DATA_FLOAT, this->shape.back(), count() / this->shape.back(), 1, 1));
-
     Tensor<T> ans(this->shape);
 
     cudnnActivationDescriptor_t dataActivation;
     cudnnCreateActivationDescriptor(&dataActivation);
     assert(CUDNN_STATUS_SUCCESS == cudnnSetActivationDescriptor(dataActivation, mode, CUDNN_PROPAGATE_NAN, 0.0));
-    assert(CUDNN_STATUS_SUCCESS == cudnnActivationForward(cudnnHandle, dataActivation, &alpha, dataTensor, (T*)this->d_data->get(), &beta, dataTensor, (T*)ans.d_data->get()));
+    assert(CUDNN_STATUS_SUCCESS == cudnnActivationForward(cudnnHandle, dataActivation, &alpha, dataTensor->get(), (T*)this->d_data->get(), &beta, dataTensor->get(), (T*)ans.d_data->get()));
     assert(CUDNN_STATUS_SUCCESS == cudnnDestroyActivationDescriptor(dataActivation));
-
-    assert(CUDNN_STATUS_SUCCESS == cudnnDestroyTensorDescriptor(dataTensor));
     return ans;
   }
 
-  Tensor activationBackward(cudnnActivationMode_t mode, const Tensor<T> &tensorAct, const Tensor<T> &tensor) const {
+  Tensor activationBackward(const Tensor<T> &tensorPost, const Tensor<T> &tensorPre, cudnnActivationMode_t mode) const {
     float alpha = 1.0f, beta = 0.0f;
-
-    cudnnTensorDescriptor_t dataTensor;
-    assert(CUDNN_STATUS_SUCCESS == cudnnCreateTensorDescriptor(&dataTensor));
-    assert(CUDNN_STATUS_SUCCESS == cudnnSetTensor4dDescriptor(dataTensor, CUDNN_TENSOR_NCHW, CUDNN_DATA_FLOAT, this->shape.back(), count() / this->shape.back(), 1, 1));
 
     cudnnActivationDescriptor_t dataActivation;
     cudnnCreateActivationDescriptor(&dataActivation);
     assert(CUDNN_STATUS_SUCCESS == cudnnSetActivationDescriptor(dataActivation, mode, CUDNN_PROPAGATE_NAN, 0.0));
-    assert(CUDNN_STATUS_SUCCESS == cudnnActivationBackward(cudnnHandle, dataActivation,
-        &alpha, dataTensor, (T*)tensorAct.d_data->get(), dataTensor, (T*)this->d_data->get(), dataTensor, (T*)tensor.d_data->get(), &beta, dataTensor, (T*)this->d_data->get()));
+    assert(CUDNN_STATUS_SUCCESS == cudnnActivationBackward(cudnnHandle, dataActivation, &alpha, dataTensor->get(), (T*)tensorPost.d_data->get(),
+        dataTensor->get(), (T*)this->d_data->get(), dataTensor->get(), (T*)tensorPre.d_data->get(), &beta, dataTensor->get(), (T*)this->d_data->get()));
     assert(CUDNN_STATUS_SUCCESS == cudnnDestroyActivationDescriptor(dataActivation));
-
-    assert(CUDNN_STATUS_SUCCESS == cudnnDestroyTensorDescriptor(dataTensor));
     return *this;
   }
   
   void learn(const Tensor<T> &tensor, T lr = -0.01) const {
-    assert(count() == tensor.count());
+    assert(this->shape == tensor.shape);
 
     assert(CUBLAS_STATUS_SUCCESS == cublasSaxpy(cublasHandle, count(), &lr, (T*)tensor.d_data->get(), 1, (T*)this->d_data->get(), 1));
   }
 
   Tensor softmaxLoss(Tensor<T> &outputs) const {
     assert(this->shape.size() == 2 && this->shape == outputs.shape);
-
-    cudnnTensorDescriptor_t dataTensor;
-    assert(CUDNN_STATUS_SUCCESS == cudnnCreateTensorDescriptor(&dataTensor));
-    assert(CUDNN_STATUS_SUCCESS == cudnnSetTensor4dDescriptor(dataTensor, CUDNN_TENSOR_NCHW, CUDNN_DATA_FLOAT, this->shape.back(), count() / this->shape.back(), 1, 1));
 
     Tensor<T> ans(this->shape, 0);
 
@@ -232,45 +242,60 @@ public:
     cublasSscal(cublasHandle, count(), &batch, (T*)ans.d_data->get(), 1);
     // float alpha = -float(count() / this->shape.back()) / this->shape.back(), beta = 0.0f;
     // assert(CUDNN_STATUS_SUCCESS == cudnnSoftmaxBackward(cudnnHandle, CUDNN_SOFTMAX_ACCURATE, CUDNN_SOFTMAX_MODE_CHANNEL,
-    //   &alpha, dataTensor, (T*)this->d_data->get(), dataTensor, (T*)outputs.d_data->get(), &beta, dataTensor, (T*)ans.d_data->get()));
-    // assert(CUDNN_STATUS_SUCCESS == cudnnDestroyTensorDescriptor(dataTensor));
-
-    assert(CUDNN_STATUS_SUCCESS == cudnnDestroyTensorDescriptor(dataTensor));
+    //   &alpha, dataTensor->get(), (T*)this->d_data->get(), dataTensor->get(), (T*)outputs.d_data->get(), &beta, dataTensor->get(), (T*)ans.d_data->get()));
     return ans;
   }
 
   Tensor softmaxForward() const {
     float alpha = 1.0f, beta = 0.0f;
 
-    cudnnTensorDescriptor_t dataTensor;
-    assert(CUDNN_STATUS_SUCCESS == cudnnCreateTensorDescriptor(&dataTensor));
-    assert(CUDNN_STATUS_SUCCESS == cudnnSetTensor4dDescriptor(dataTensor, CUDNN_TENSOR_NCHW, CUDNN_DATA_FLOAT, this->shape.back(), count() / this->shape.back(), 1, 1));
-
     Tensor<T> ans(this->shape);
 
     assert(CUDNN_STATUS_SUCCESS == cudnnSoftmaxForward(cudnnHandle, CUDNN_SOFTMAX_ACCURATE, CUDNN_SOFTMAX_MODE_CHANNEL,
-        &alpha, dataTensor, (T*)this->d_data->get(), &beta, dataTensor, (T*)ans.d_data->get()));
-
-    assert(CUDNN_STATUS_SUCCESS == cudnnDestroyTensorDescriptor(dataTensor));
+        &alpha, dataTensor->get(), (T*)this->d_data->get(), &beta, dataTensor->get(), (T*)ans.d_data->get()));
     return ans;
   }
+
+  Tensor poolingForward(int size, int stride, cudnnPoolingMode_t mode = CUDNN_POOLING_MAX) const {
+    assert(this->shape.size() == 4);
+
+    float alpha = 1.0f, beta = 0.0f;
+
+    Tensor<T> ans({this->shape[0] / stride, this->shape[1] / stride, this->shape[2], this->shape[3]});
+
+    cudnnPoolingDescriptor_t poolDesc;
+    cudnnCreatePoolingDescriptor(&poolDesc);
+    cudnnSetPooling2dDescriptor(poolDesc, mode, CUDNN_PROPAGATE_NAN, size, size, 0, 0, stride, stride);
+    cudnnPoolingForward(cudnnHandle, poolDesc, &alpha, dataTensor->get(), (T*)this->d_data->get(), &beta, ans.dataTensor->get(), (T*)ans.d_data->get());
+    cudnnDestroyPoolingDescriptor(poolDesc);
+    return ans;
+  }
+
+  Tensor poolingBackward(const Tensor<T> &tensorPost, const Tensor<T> &tensorPre, int size, int stride, cudnnPoolingMode_t mode = CUDNN_POOLING_MAX) const {
+    assert(this->shape.size() == 4);
+
+    float alpha = 1.0f, beta = 0.0f;
+
+    Tensor<T> ans({this->shape[0] * stride, this->shape[1] * stride, this->shape[2], this->shape[3]});
+
+    cudnnPoolingDescriptor_t poolDesc;
+    cudnnCreatePoolingDescriptor(&poolDesc);
+    cudnnSetPooling2dDescriptor(poolDesc, mode, CUDNN_PROPAGATE_NAN, size, size, 0, 0, stride, stride);
+    cudnnPoolingBackward(cudnnHandle, poolDesc, &alpha, dataTensor->get(), (T*)tensorPost.d_data->get(), dataTensor->get(), (T*)this->d_data->get(),
+                         ans.dataTensor->get(), (T*)tensorPre.d_data->get(), &beta, ans.dataTensor->get(), (T*)ans.d_data->get());
+    cudnnDestroyPoolingDescriptor(poolDesc);
+    return ans;
+  }
+
+  /*Tensor convolutionForward(int filters, int kernel_h, int kernel_w) const {
+    cudnnConvolutionDescriptor_t convDesc;
+    cudnnConvolutionFwdAlgo_t convalgo;
+    cudnnConvolutionBwdFilterAlgo_t convbwfalgo;
+    cudnnConvolutionBwdDataAlgo_t convbwdalgo;
+    return *this;
+  }*/
 };
 
-
-vector<float> random_uniform(int size) {
-  vector<float> r(size);
-  float avg1 = 0.0f, avg2 = 0.0f, dev;
-
-  for (int i = 0; i < r.size(); ++i) {
-    r[i] = rand() / float(RAND_MAX);
-    avg1 += r[i], avg2 += r[i] * r[i];
-  }
-  avg1 /= r.size(), avg2 /= r.size(), dev = sqrt(avg2 - avg1 * avg1);
-
-  for (int i = 0; i < r.size(); ++i)
-    r[i] = (r[i] - avg1) / dev;
-  return move(r);
-}
 
 pair<vector<uint8_t>, vector<uint8_t> > ReadUByteDataset(const char* image_filename, const char* label_filename) {
     auto read_uint32 = [&](FILE *fp) {
@@ -310,22 +335,37 @@ pair<vector<uint8_t>, vector<uint8_t> > ReadUByteDataset(const char* image_filen
 
 int main() {
   /*
-    @input_shape = batch_size * 784
+    => input_shape = (784, batch_size)
     + Layer::Dense(512)
     + Layer::Dense(512)
     + Layer::Dense(10)
-    @output_shape: batch_size * 10
+    => output_shape: (10, batch_size)
   */
 
   Tensor<float>::init();
   
   // srand(time(0));
 
+  auto random_uniform = [&](int size) {
+    vector<float> r(size);
+    float avg1 = 0.0f, avg2 = 0.0f, dev;
+
+    for (int i = 0; i < r.size(); ++i) {
+      r[i] = rand() / float(RAND_MAX);
+      avg1 += r[i], avg2 += r[i] * r[i];
+    }
+    avg1 /= r.size(), avg2 /= r.size(), dev = sqrt(avg2 - avg1 * avg1);
+
+    for (int i = 0; i < r.size(); ++i)
+      r[i] = (r[i] - avg1) / dev;
+    return move(r);
+  };
+
   int batch_size = 128;
   Tensor<float> ones({batch_size, 1}, 1),
-      w_fc1({784, 512}, random_uniform(784 * 512)), w_fc1bias({512}, random_uniform(512)),
-      w_fc2({512, 512}, random_uniform(512 * 512)), w_fc2bias({512}, random_uniform(512)),
-      w_fc3({512, 10}, random_uniform(512 * 10)), w_fc3bias({10}, random_uniform(10));
+      w_fc1({784, 512}, random_uniform(784 * 512)), w_fc1bias({512, 1}, random_uniform(512)),
+      w_fc2({512, 512}, random_uniform(512 * 512)), w_fc2bias({512, 1}, random_uniform(512)),
+      w_fc3({512, 10}, random_uniform(512 * 10)), w_fc3bias({10, 1}, random_uniform(10));
 
   vector<float> in(784 * batch_size), out(10 * batch_size);
 
@@ -333,7 +373,8 @@ int main() {
   int samples = dataset.first.size() / 784;
   printf("Total %d samples found.\n", samples);
 
-  for (int t = 0, it = 0; t < 102400; ++t) {
+  int it = 0, epochs = 10, steps = (samples + batch_size - 1) / batch_size * epochs;
+  for (int k = 0; k < steps; ++k) {
     memset(out.data(), 0, out.size() * sizeof(float));
     for (int i = 0; i < batch_size; ++i, it = (it + 1) % samples) {
       int lb = dataset.second[it * 1];
@@ -342,7 +383,9 @@ int main() {
         in[i * 784 + j] = dataset.first[it * 784 + j] / 255.0;
     }
 
-    Tensor<float> images({784, batch_size}, in), labels({10, batch_size}, out);
+    Tensor<float> images({28, 28, 1, batch_size}, in), labels({10, batch_size}, out);
+
+    images = images.reshape({784, batch_size});
 
     auto fc1_out = w_fc1.matmul(images, true, false).incbias(w_fc1bias, ones);   // shape = {512, batch_size}
     auto fc1_act = fc1_out.activationForward(CUDNN_ACTIVATION_RELU);              // shape = {512, batch_size}
@@ -356,12 +399,12 @@ int main() {
     auto fc3_dloss = fc3_act.softmaxLoss(labels);                                 // shape = {10, batch_size}
     auto fc3_grad_w = fc2_act.matmul(fc3_dloss, false, true);                    // shape = {512, 10}
     auto fc3_grad_b = fc3_dloss.matmul(ones);                                     // shape = {10, 1}
-    auto fc2_dloss = w_fc3.matmul(fc3_dloss).activationBackward(CUDNN_ACTIVATION_RELU, fc2_act, fc2_out); // shape = {512, batch_size}
 
+    auto fc2_dloss = w_fc3.matmul(fc3_dloss).activationBackward(fc2_act, fc2_out, CUDNN_ACTIVATION_RELU); // shape = {512, batch_size}
     auto fc2_grad_w = fc1_act.matmul(fc2_dloss, false, true);                                             // shape = {512, 512}
     auto fc2_grad_b = fc2_dloss.matmul(ones);                                                              // shape = {512, 1}
-    auto fc1_dloss = w_fc2.matmul(fc2_dloss).activationBackward(CUDNN_ACTIVATION_RELU, fc1_act, fc1_out); // shape = {512, batch_size}
 
+    auto fc1_dloss = w_fc2.matmul(fc2_dloss).activationBackward(fc1_act, fc1_out, CUDNN_ACTIVATION_RELU); // shape = {512, batch_size}
     auto fc1_grad_w = images.matmul(fc1_dloss, false, true);                                              // shape = {784, 512}
     auto fc1_grad_b = fc1_dloss.matmul(ones);                                                              // shape = {512, 1}
 
@@ -373,12 +416,27 @@ int main() {
         if (j >= 1e-8)
           loss += -j * log(j);
       }
+      vector<float> pred_data = fc3_act.get_data();
+      int tot = 0, acc = 0;
+      for (int i = 0; i < batch_size; ++i) {
+        int it = 0, jt = 0;
+        for (int j = 1; j < 10; ++j) {
+          if (pred_data[i * 10 + it] < pred_data[i * 10 + j])
+            it = j;
+          if (out[i * 10 + jt] < out[i * 10 + j])
+            jt = j;
+        }
+        ++tot;
+        if (it == jt)
+          ++acc;
+      }
       static int step = 0;
       static unsigned long prev = 0LU;
       struct timeval tv;
       gettimeofday(&tv, NULL);
       unsigned long current = tv.tv_sec * 1000000LU + tv.tv_usec;
-      printf("epoch = %d: loss = %.4f, time = %.4lf s\n", ++step, loss, prev ? (current - prev) * 1e-6 : 0);
+
+      printf("epoch = %d: loss = %.4f, acc = %.2f%%, time = %.4lfs\n", ++step, loss, acc * 100.0f / tot, prev ? (current - prev) * 1e-6 : 0);
       prev = current;
     }
 
