@@ -4,9 +4,9 @@
 
   Maintainer: Wei CUI <ghostplant@qq.com>
 
-  Benchmark:
-  (CPP + CUDNN)     mnist_mlp: 2.76 sec/epoll (batch_size = 32)
-  (Keras + TF_CUDA) mnist_mlp: 8.34 sec/epoll (batch_size = 32)
+  Benchmark on Nvida Tesla P100:
+  * CPP + CUDNN      mnist_mlp: 2.76 sec/epoll (batch_size = 32)
+  * Keras + TF4CUDA  mnist_mlp: 8.34 sec/epoll (batch_size = 32)
 */
 
 #include <vector>
@@ -56,7 +56,7 @@ public:
     assert(shape.size() <= 4);
     int dimA[4] = {1, 1, 1, 1};
     for (int i = 0; i < shape.size(); ++i)
-      dimA[i] = shape[shape.size() - 1 - i];
+      dimA[i] = shape[i];
     assert(CUDNN_STATUS_SUCCESS == cudnnSetTensor4dDescriptor(dataTensor, CUDNN_TENSOR_NCHW, CUDNN_DATA_FLOAT, dimA[0], dimA[1], dimA[2], dimA[3]));
   }
 
@@ -159,45 +159,63 @@ public:
   }
 
   Tensor matmul(const Tensor<T> &that, bool transposeThis = false, bool transposeThat = false) const {
-    // ans = *this * that;
-    assert(this->shape.size() == 2 && that.shape.size() == 2);
+    // ans = this * &that;
+    const Tensor<T> *A = &that, *B = this;
+    bool transposeA = transposeThat, transposeB = transposeThis;
 
-    int ax = this->shape[0], ay = this->shape[1];
-    if (transposeThis)
+    assert(A->shape.size() == 2 && B->shape.size() == 2);
+
+    int ax = A->shape[1], ay = A->shape[0];
+    if (transposeA)
       swap(ax, ay);
-    int bx = that.shape[0], by = that.shape[1];
-    if (transposeThat)
+    int bx = B->shape[1], by = B->shape[0];
+    if (transposeB)
       swap(bx, by);
     assert(ay == bx);
 
-    Tensor<T> ans({ax, by});
+    Tensor<T> ans({by, ax});
 
     float alpha = 1.0f, beta = 0.0f;
     assert(0 == cublasSgemm(cublasHandle,
-                            transposeThis ? CUBLAS_OP_T : CUBLAS_OP_N, transposeThat ? CUBLAS_OP_T : CUBLAS_OP_N,
-                            ax, by, ay,
-                            &alpha,
-                            (T*)this->d_data->get(), this->shape[0], // X
-                            (T*)that.d_data->get(), that.shape[0],  // Y
-                            &beta,
-                            (T*)ans.d_data->get(), ans.shape[0]));   // Z
+                            transposeA ? CUBLAS_OP_T : CUBLAS_OP_N, transposeB ? CUBLAS_OP_T : CUBLAS_OP_N,
+                            ax, by, ay, &alpha,
+                            (T*)A->d_data->get(), A->shape[1], // X
+                            (T*)B->d_data->get(), B->shape[1],  // Y
+                            &beta, (T*)ans.d_data->get(), ans.shape[1]));   // Z
+    return ans;
+  }
+
+  Tensor matadd(const Tensor<T> &that) const {
+    assert(this->shape == that.shape);
+    Tensor ans(this->shape, 0);
+    float alpha = 1.0f;
+    assert(CUBLAS_STATUS_SUCCESS == cublasSaxpy(cublasHandle, count(), &alpha, (T*)this->d_data->get(), 1, (T*)ans.d_data->get(), 1));
+    assert(CUBLAS_STATUS_SUCCESS == cublasSaxpy(cublasHandle, count(), &alpha, (T*)that.d_data->get(), 1, (T*)ans.d_data->get(), 1));
     return ans;
   }
 
   Tensor incbias(const Tensor<T> &bias, const Tensor<T> &ones) const {
-    // self += B * ones'T; -- ones.shape == 1 x batch_size
-    assert(this->shape.size() == 2 && bias.shape.size() == 2 && this->shape[0] == bias.shape[0] && bias.shape[1] == 1);
+    // self += ones * bias 'T;
+    // ~ this.shape = (batch_size, chan); bias.shape = (1, chan); ones.shape == (batch_size, 1);
+    assert(this->shape.size() == 2 && bias.shape.size() == 2 && this->shape[1] == bias.shape[1] && bias.shape[0] == 1);
+    // return this->matadd(ones.matmul(bias));
 
     float alpha = 1.0f;
     cublasSgemm(cublasHandle,
                 CUBLAS_OP_N, CUBLAS_OP_N,
-                bias.shape[0], this->shape[1], 1,
+                bias.shape[1], this->shape[0], 1,
                 &alpha,
-                (T*)bias.d_data->get(), bias.shape[0], // B
+                (T*)bias.d_data->get(), bias.shape[1], // B
                 (T*)ones.d_data->get(), 1,  // 1
                 &alpha,
-                (T*)this->d_data->get(), this->shape[0]);   // self
+                (T*)this->d_data->get(), this->shape[1]);   // self
     return *this;
+  }
+
+  void learn(const Tensor<T> &tensor, T lr = -0.01) const {
+    assert(this->shape == tensor.shape);
+
+    assert(CUBLAS_STATUS_SUCCESS == cublasSaxpy(cublasHandle, count(), &lr, (T*)tensor.d_data->get(), 1, (T*)this->d_data->get(), 1));
   }
 
   Tensor activationForward(cudnnActivationMode_t mode = CUDNN_ACTIVATION_SIGMOID) const {
@@ -224,23 +242,17 @@ public:
     assert(CUDNN_STATUS_SUCCESS == cudnnDestroyActivationDescriptor(dataActivation));
     return *this;
   }
-  
-  void learn(const Tensor<T> &tensor, T lr = -0.01) const {
-    assert(this->shape == tensor.shape);
-
-    assert(CUBLAS_STATUS_SUCCESS == cublasSaxpy(cublasHandle, count(), &lr, (T*)tensor.d_data->get(), 1, (T*)this->d_data->get(), 1));
-  }
 
   Tensor softmaxLoss(Tensor<T> &outputs) const {
     assert(this->shape.size() == 2 && this->shape == outputs.shape);
 
     Tensor<T> ans(this->shape, 0);
 
-    float posi = 1.0f, nega = -1.0f, batch = 1.0 / this->shape.back();
+    float posi = 1.0f, nega = -1.0f, batch = 1.0 / this->shape[0];
     cublasSaxpy(cublasHandle, count(), &posi, (T*)this->d_data->get(), 1, (T*)ans.d_data->get(), 1);
     cublasSaxpy(cublasHandle, count(), &nega, (T*)outputs.d_data->get(), 1, (T*)ans.d_data->get(), 1);
     cublasSscal(cublasHandle, count(), &batch, (T*)ans.d_data->get(), 1);
-    // float alpha = -float(count() / this->shape.back()) / this->shape.back(), beta = 0.0f;
+    // float alpha = -float(count() / this->shape[0]) / this->shape[0], beta = 0.0f;
     // assert(CUDNN_STATUS_SUCCESS == cudnnSoftmaxBackward(cudnnHandle, CUDNN_SOFTMAX_ACCURATE, CUDNN_SOFTMAX_MODE_CHANNEL,
     //   &alpha, dataTensor->get(), (T*)this->d_data->get(), dataTensor->get(), (T*)outputs.d_data->get(), &beta, dataTensor->get(), (T*)ans.d_data->get()));
     return ans;
@@ -261,7 +273,7 @@ public:
 
     float alpha = 1.0f, beta = 0.0f;
 
-    Tensor<T> ans({this->shape[0] / stride, this->shape[1] / stride, this->shape[2], this->shape[3]});
+    Tensor<T> ans({this->shape[0], this->shape[1], this->shape[2] / stride, this->shape[3] / stride});
 
     cudnnPoolingDescriptor_t poolDesc;
     cudnnCreatePoolingDescriptor(&poolDesc);
@@ -276,7 +288,7 @@ public:
 
     float alpha = 1.0f, beta = 0.0f;
 
-    Tensor<T> ans({this->shape[0] * stride, this->shape[1] * stride, this->shape[2], this->shape[3]});
+    Tensor<T> ans({this->shape[0], this->shape[1], this->shape[2] * stride, this->shape[3] * stride});
 
     cudnnPoolingDescriptor_t poolDesc;
     cudnnCreatePoolingDescriptor(&poolDesc);
@@ -287,13 +299,156 @@ public:
     return ans;
   }
 
-  /*Tensor convolutionForward(int filters, int kernel_h, int kernel_w) const {
+  Tensor lrnCrossForward(unsigned depthRadius, float bias, float lrnAlpha, float lrnBeta) const {
+    assert(this->shape.size() == 4);
+
+    float alpha = 1.0f, beta = 0.0f;
+
+    Tensor<T> ans(this->shape);
+
+    unsigned lrnN = 2 * depthRadius + 1;
+    assert(bias > 1e-5);
+    cudnnLRNDescriptor_t lrnDesc;
+    cudnnCreateLRNDescriptor(&lrnDesc);
+    assert(CUDNN_STATUS_SUCCESS == cudnnSetLRNDescriptor(lrnDesc, lrnN, lrnAlpha * lrnN, lrnBeta, bias));
+    assert(CUDNN_STATUS_SUCCESS == cudnnLRNCrossChannelForward(cudnnHandle, lrnDesc, CUDNN_LRN_CROSS_CHANNEL_DIM1,
+        &alpha, this->dataTensor->get(), (T*)this->d_data->get(), &beta, ans.dataTensor->get(), (T*)ans.d_data->get()));
+    cudnnDestroyLRNDescriptor(lrnDesc);
+    return ans;
+  }
+
+  Tensor lrnCrossBackward(const Tensor<T> &tensorPost, const Tensor<T> &tensorPre, unsigned depthRadius, float bias, float lrnAlpha, float lrnBeta) const {
+    assert(this->shape.size() == 4);
+
+    float alpha = 1.0f, beta = 0.0f;
+
+    Tensor<T> ans(this->shape);
+
+    unsigned lrnN = 2 * depthRadius + 1;
+    assert(bias >= CUDNN_LRN_MIN_K && lrnBeta >= CUDNN_LRN_MIN_BETA && lrnN >= CUDNN_LRN_MIN_N && lrnN <= CUDNN_LRN_MAX_N);
+    cudnnLRNDescriptor_t lrnDesc;
+    cudnnCreateLRNDescriptor(&lrnDesc);
+    assert(CUDNN_STATUS_SUCCESS == cudnnSetLRNDescriptor(lrnDesc, lrnN, lrnAlpha * lrnN, lrnBeta, bias));
+    assert(CUDNN_STATUS_SUCCESS == cudnnLRNCrossChannelBackward(cudnnHandle, lrnDesc, CUDNN_LRN_CROSS_CHANNEL_DIM1,
+        &alpha, tensorPost.dataTensor->get(), (T*)tensorPost.d_data->get(), this->dataTensor->get(), (T*)this->d_data->get(),
+        &beta, tensorPre.dataTensor->get(), (T*)tensorPre.d_data->get(), ans.dataTensor->get(), (T*)ans.d_data->get()));
+    cudnnDestroyLRNDescriptor(lrnDesc);
+    return ans;
+  }
+
+  Tensor convolutionForward(int filters, int kernel_h, int kernel_w) const {
+    assert(this->shape.size() == 4);
+
+    float alpha = 1.0f, beta = 0.0f;
+    unsigned in_chan = this->shape[1], out_chan = this->shape[1] * filters;
+
+    cudnnFilterDescriptor_t filterDesc;
+    cudnnCreateFilterDescriptor(&filterDesc);
+    cudnnSetFilter4dDescriptor(filterDesc, CUDNN_DATA_FLOAT, CUDNN_TENSOR_NCHW,
+        out_chan, in_chan, kernel_h, kernel_w);
+
     cudnnConvolutionDescriptor_t convDesc;
+    cudnnCreateConvolutionDescriptor(&convDesc);
+    cudnnSetConvolution2dDescriptor(convDesc, 0, 0, 1, 1, 1, 1, CUDNN_CROSS_CORRELATION, CUDNN_DATA_FLOAT);
+
+    int n, c, h, w;
+    assert(CUDNN_STATUS_SUCCESS == cudnnGetConvolution2dForwardOutputDim(convDesc, this->dataTensor->get(), filterDesc, &n, &c, &h, &w));
+
+    Tensor<T> ans({n, c, h, w});
+
     cudnnConvolutionFwdAlgo_t convalgo;
-    cudnnConvolutionBwdFilterAlgo_t convbwfalgo;
-    cudnnConvolutionBwdDataAlgo_t convbwdalgo;
-    return *this;
-  }*/
+    assert(CUDNN_STATUS_SUCCESS == cudnnGetConvolutionForwardAlgorithm(cudnnHandle, this->dataTensor->get(), filterDesc, convDesc,
+        ans.dataTensor->get(), CUDNN_CONVOLUTION_FWD_NO_WORKSPACE /* CUDNN_CONVOLUTION_FWD_PREFER_FASTEST */, 0, &convalgo));
+
+    size_t sizeInBytes = 0;
+    assert(CUDNN_STATUS_SUCCESS == cudnnGetConvolutionForwardWorkspaceSize(cudnnHandle, this->dataTensor->get(), filterDesc, convDesc,
+        ans.dataTensor->get(), convalgo, &sizeInBytes));
+    assert(sizeInBytes == 0);
+
+    Tensor<T> w_krnl({in_chan * out_chan * kernel_h * kernel_w}, 1.0f);
+    assert(CUDNN_STATUS_SUCCESS == cudnnConvolutionForward(cudnnHandle, &alpha, this->dataTensor->get(), (T*)this->d_data->get(), filterDesc,
+        (T*)w_krnl.d_data->get(), convDesc, convalgo, NULL, sizeInBytes, &beta, ans.dataTensor->get(), (T*)ans.d_data->get()));
+
+    cudnnDestroyConvolutionDescriptor(convDesc);
+    cudnnDestroyFilterDescriptor(filterDesc);
+
+    // cudnnConvolutionBwdFilterAlgo_t convbwfalgo;
+    // cudnnConvolutionBwdDataAlgo_t convbwdalgo;
+    return ans;
+  }
+
+  /*
+  Tensor batchNormalizationForward(cudnnBatchNormMode_t mode = CUDNN_BATCHNORM_PER_ACTIVATION) const {
+    assert(this->shape.size() == 4);
+
+    float alpha = 1.0f, beta = 0.0f;
+
+    Tensor<T> ans(this->shape);
+
+    // mode == CUDNN_BATCHNORM_PER_ACTIVATION ==> 1xCxHxW
+    // mode == CUDNN_BATCHNORM_SPATIAL ==> 1xCx1x1
+    // assert(CUDNN_STATUS_SUCCESS == cudnnBatchNormalizationForwardInference(cudnnHandle, mode,
+    //     &alpha, &beta, this->dataTensor->get(), (T*)this->d_data->get(), ans.dataTensor->get(), (T*)ans.d_data->get(),
+    //     bnScaleBiasMeanVarDesc, bnScale, bnBias, estimatedMean, estimatedVariance, CUDNN_BN_MIN_EPSILON));
+    return ans;
+  }
+
+  cudnnStatus_t CUDNNWINAPI cudnnBatchNormalizationForwardInference(
+                                  cudnnHandle_t                       handle,
+                                  cudnnBatchNormMode_t                mode,
+                                  const void                         *alpha, // alpha[0] = result blend factor
+                                  const void                         *beta,  // beta[0] = dest layer blend factor
+                                  const cudnnTensorDescriptor_t       xDesc,
+                                  const void                         *x,     // NxCxHxW
+                                  const cudnnTensorDescriptor_t       yDesc,
+                                  void                               *y,     // NxCxHxW
+                                  const cudnnTensorDescriptor_t       bnScaleBiasMeanVarDesc,
+                                  const void                         *bnScale,
+                                  const void                         *bnBias,
+                                  const void                         *estimatedMean,
+                                  const void                         *estimatedVariance,
+                                  double                              epsilon )
+
+  cudnnStatus_t CUDNNWINAPI cudnnBatchNormalizationForwardTraining(
+                                  cudnnHandle_t                       handle,
+                                  cudnnBatchNormMode_t                mode,
+                                  const void                         *alpha, // alpha[0] = result blend factor
+                                  const void                         *beta,  // beta[0] = dest layer blend factor
+                                  const cudnnTensorDescriptor_t       xDesc,
+                                  const void                         *x,     // NxCxHxW
+                                  const cudnnTensorDescriptor_t       yDesc,
+                                  void                               *y,     // NxCxHxW
+                                  const cudnnTensorDescriptor_t       bnScaleBiasMeanVarDesc,
+                                  const void                         *bnScale,
+                                  const void                         *bnBias,
+                                  double                              exponentialAverageFactor,
+                                  void                               *resultRunningMean,
+                                  void                               *resultRunningVariance,
+                                  double                              epsilon,
+                                  void                               *resultSaveMean,
+                                  void                               *resultSaveInvVariance )
+
+  cudnnStatus_t CUDNNWINAPI cudnnBatchNormalizationBackward(
+                                  cudnnHandle_t                       handle,
+                                  cudnnBatchNormMode_t                mode,
+                                  const void                         *alphaDataDiff,
+                                  const void                         *betaDataDiff,
+                                  const void                         *alphaParamDiff,
+                                  const void                         *betaParamDiff,
+                                  const cudnnTensorDescriptor_t       xDesc, // same desc for x, dx, dy
+                                  const void                         *x,
+                                  const cudnnTensorDescriptor_t       dyDesc,
+                                  const void                         *dy,
+                                  const cudnnTensorDescriptor_t       dxDesc,
+                                  void                               *dx,
+                                  const cudnnTensorDescriptor_t       dBnScaleBiasDesc,
+                                  const void                         *bnScale, // bnBias doesn't affect backpropagation
+                                  void                               *dBnScaleResult,
+                                  void                               *dBnBiasResult,
+                                  double                              epsilon,
+                                  const void                         *savedMean,
+                                  const void                         *savedInvVariance )
+  */
 };
 
 
@@ -335,16 +490,14 @@ pair<vector<uint8_t>, vector<uint8_t> > ReadUByteDataset(const char* image_filen
 
 int main() {
   /*
-    => input_shape = (784, batch_size)
+    => input_shape = (batch_size, 784)
     + Layer::Dense(512)
     + Layer::Dense(512)
     + Layer::Dense(10)
-    => output_shape: (10, batch_size)
+    => output_shape: (batch_size, 10)
   */
 
-  Tensor<float>::init();
-  
-  // srand(time(0));
+  srand(10);
 
   auto random_uniform = [&](int size) {
     vector<float> r(size);
@@ -361,11 +514,13 @@ int main() {
     return move(r);
   };
 
+  Tensor<float>::init();
+
   int batch_size = 128;
   Tensor<float> ones({batch_size, 1}, 1),
-      w_fc1({784, 512}, random_uniform(784 * 512)), w_fc1bias({512, 1}, random_uniform(512)),
-      w_fc2({512, 512}, random_uniform(512 * 512)), w_fc2bias({512, 1}, random_uniform(512)),
-      w_fc3({512, 10}, random_uniform(512 * 10)), w_fc3bias({10, 1}, random_uniform(10));
+      w_fc1({512, 784}, random_uniform(784 * 512)), w_fc1bias({1, 512}, random_uniform(512)),
+      w_fc2({512, 512}, random_uniform(512 * 512)), w_fc2bias({1, 512}, random_uniform(512)),
+      w_fc3({10, 512}, random_uniform(512 * 10)), w_fc3bias({1, 10}, random_uniform(10));
 
   vector<float> in(784 * batch_size), out(10 * batch_size);
 
@@ -373,7 +528,7 @@ int main() {
   int samples = dataset.first.size() / 784;
   printf("Total %d samples found.\n", samples);
 
-  int it = 0, epochs = 10, steps = (samples + batch_size - 1) / batch_size * epochs;
+  int it = 0, epochs = 100, steps = (samples + batch_size - 1) / batch_size * epochs;
   for (int k = 0; k < steps; ++k) {
     memset(out.data(), 0, out.size() * sizeof(float));
     for (int i = 0; i < batch_size; ++i, it = (it + 1) % samples) {
@@ -383,30 +538,38 @@ int main() {
         in[i * 784 + j] = dataset.first[it * 784 + j] / 255.0;
     }
 
-    Tensor<float> images({28, 28, 1, batch_size}, in), labels({10, batch_size}, out);
+    Tensor<float> images({batch_size, 1, 28, 28}, in), labels({batch_size, 10}, out);
 
-    images = images.reshape({784, batch_size});
+    images = images.reshape({batch_size, 784});
 
-    auto fc1_out = w_fc1.matmul(images, true, false).incbias(w_fc1bias, ones);   // shape = {512, batch_size}
-    auto fc1_act = fc1_out.activationForward(CUDNN_ACTIVATION_RELU);              // shape = {512, batch_size}
+    auto fc1_out = images.matmul(w_fc1, false, true).incbias(w_fc1bias, ones);   // shape = {batch_size, 512}
+    auto fc1_act = fc1_out.activationForward(CUDNN_ACTIVATION_RELU);              // shape = {batch_size, 512}
 
-    auto fc2_out = w_fc2.matmul(fc1_act, true, false).incbias(w_fc2bias, ones);  // shape = {512, batch_size}
-    auto fc2_act = fc2_out.activationForward(CUDNN_ACTIVATION_RELU);              // shape = {512, batch_size}
+    auto fc2_out = fc1_act.matmul(w_fc2, false, true).incbias(w_fc2bias, ones);  // shape = {batch_size, 512}
+    auto fc2_act = fc2_out.activationForward(CUDNN_ACTIVATION_RELU);              // shape = {batch_size, 512}
 
-    auto fc3_out = w_fc3.matmul(fc2_act, true, false).incbias(w_fc3bias, ones);  // shape = {10, batch_size}
-    auto fc3_act = fc3_out.softmaxForward();                                      // shape = {10, batch_size}
+    auto fc3_out = fc2_act.matmul(w_fc3, false, true).incbias(w_fc3bias, ones);  // shape = {batch_size, 10}
+    auto fc3_act = fc3_out.softmaxForward();                                      // shape = {batch_size, 10}
 
-    auto fc3_dloss = fc3_act.softmaxLoss(labels);                                 // shape = {10, batch_size}
-    auto fc3_grad_w = fc2_act.matmul(fc3_dloss, false, true);                    // shape = {512, 10}
-    auto fc3_grad_b = fc3_dloss.matmul(ones);                                     // shape = {10, 1}
+    auto fc3_dloss = fc3_act.softmaxLoss(labels);                                 // shape = {batch_size, 10}
+    auto fc3_grad_w = fc3_dloss.matmul(fc2_act, true, false);                    // shape = {10, 512}
+    auto fc3_grad_b = ones.matmul(fc3_dloss, true, false);                       // shape = {10, 1}
 
-    auto fc2_dloss = w_fc3.matmul(fc3_dloss).activationBackward(fc2_act, fc2_out, CUDNN_ACTIVATION_RELU); // shape = {512, batch_size}
-    auto fc2_grad_w = fc1_act.matmul(fc2_dloss, false, true);                                             // shape = {512, 512}
-    auto fc2_grad_b = fc2_dloss.matmul(ones);                                                              // shape = {512, 1}
+    auto fc2_dloss = fc3_dloss.matmul(w_fc3).activationBackward(fc2_act, fc2_out, CUDNN_ACTIVATION_RELU); // shape = {batch_size, 512}
+    auto fc2_grad_w = fc2_dloss.matmul(fc1_act, true, false);                                             // shape = {512, 512}
+    auto fc2_grad_b = ones.matmul(fc2_dloss, true, false);                                                // shape = {512, 1}
 
-    auto fc1_dloss = w_fc2.matmul(fc2_dloss).activationBackward(fc1_act, fc1_out, CUDNN_ACTIVATION_RELU); // shape = {512, batch_size}
-    auto fc1_grad_w = images.matmul(fc1_dloss, false, true);                                              // shape = {784, 512}
-    auto fc1_grad_b = fc1_dloss.matmul(ones);                                                              // shape = {512, 1}
+    auto fc1_dloss = fc2_dloss.matmul(w_fc2).activationBackward(fc1_act, fc1_out, CUDNN_ACTIVATION_RELU); // shape = {batch_size, 512}
+    auto fc1_grad_w = fc1_dloss.matmul(images, true, false);                                              // shape = {512, 784}
+    auto fc1_grad_b = ones.matmul(fc1_dloss, true, false);                                                // shape = {512, 1}
+
+    w_fc1.learn(fc1_grad_w);
+    w_fc1bias.learn(fc1_grad_b);
+    w_fc2.learn(fc2_grad_w);
+    w_fc2bias.learn(fc2_grad_b);
+    w_fc3.learn(fc3_grad_w);
+    w_fc3bias.learn(fc3_grad_b);
+
 
     if (it < batch_size) {
       vector<float> loss_data = fc3_dloss.get_data();
@@ -439,13 +602,6 @@ int main() {
       printf("epoch = %d: loss = %.4f, acc = %.2f%%, time = %.4lfs\n", ++step, loss, acc * 100.0f / tot, prev ? (current - prev) * 1e-6 : 0);
       prev = current;
     }
-
-    w_fc1.learn(fc1_grad_w);
-    w_fc1bias.learn(fc1_grad_b);
-    w_fc2.learn(fc2_grad_w);
-    w_fc2bias.learn(fc2_grad_b);
-    w_fc3.learn(fc3_grad_w);
-    w_fc3bias.learn(fc3_grad_b);
   }
   return 0;
 }
