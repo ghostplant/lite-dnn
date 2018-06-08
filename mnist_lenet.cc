@@ -272,21 +272,14 @@ public:
       cout << '\n';
       return;
     }
-    {
-      cout << "\n<< count = " << host.size() << ">> ";
-      float val = 0, val2 = 0;
-      for (int i = 0; i < host.size(); ++i)
-        val += host[i], val2 += host[i] * host[i];
-      std::cout << val << "::" << val2 << " -- ";
-    }
     for (int i = 0; i < host.size(); ++i) {
       if (fabs(host[i]) < 1e-8)
         host[i] = 0;
       if ((i & 7) == 0)
-        std::cout << '\n';
-      printf("%5d/%.4f ", i, host[i]);
+        cout << '\n';
+      cout << int(1e3 * host[i]) * 1e-3 << '\t';
       if (i + 1 == host.size())
-        putchar('\n');
+        cout << '\n';
       if (i >= 100 && i + 1 < host.size()) {
         cout << "...\n";
         break;
