@@ -190,10 +190,13 @@ public:
     lastClock = get_microseconds();
   }
 
-  Tensor(const vector<int> &shape, void *ptr): shape(shape) {
-    size_t len = count();
-    d_data = make_shared<DeviceMemory>(len * sizeof(T));
-    dataTensor = make_shared<TensorHandler>(shape);
+
+  Tensor(const vector<int> &shape, bool random = false) {
+    size_t len = setup_tensor(shape);
+
+    if (!random)
+      return;
+
     float range = sqrt(3.0f / len);
 
     auto random_uniform = [&](int size) {
@@ -211,25 +214,31 @@ public:
       return move(r);
     };
 
-    assert(CUDA_SUCCESS == cuMemcpyHtoDAsync_v2((CUdeviceptr)d_data->get(), random_uniform(len).data(), len * sizeof(T), hStream));
+    set_data(random_uniform(len));
   }
 
-  Tensor(const vector<int> &shape, const vector<T> &host = {}): shape(shape) {
-    size_t len = count();
-    d_data = make_shared<DeviceMemory>(len * sizeof(T));
-    dataTensor = make_shared<TensorHandler>(shape);
+  Tensor(const vector<int> &shape, const vector<T> &host) {
+    size_t len = setup_tensor(shape);
 
-    if (host.size() > 0)
-      assert(CUDA_SUCCESS == cuMemcpyHtoDAsync_v2((CUdeviceptr)d_data->get(), host.data(), len * sizeof(T), hStream));
+    assert(host.size() == len);
+    set_data(host);
   }
 
-  Tensor(const vector<int> &shape, const T val): shape(shape) {
-    size_t len = count();
-    d_data = make_shared<DeviceMemory>(len * sizeof(T));
-    dataTensor = make_shared<TensorHandler>(shape);
+  Tensor(const vector<int> &shape, const T val) {
+    size_t len = setup_tensor(shape);
 
+    assert(sizeof(T) == sizeof(unsigned int));
     unsigned int ui = (unsigned int&)val;
     assert(CUDA_SUCCESS == cuMemsetD32Async((CUdeviceptr)d_data->get(), ui, len, hStream));
+  }
+
+
+  size_t setup_tensor(const vector<int> &shape) {
+    this->shape = shape;
+    size_t len = count();
+    d_data = make_shared<DeviceMemory>(len * sizeof(T));
+    dataTensor = make_shared<TensorHandler>(shape);
+    return len;
   }
 
   size_t count() const {
@@ -237,6 +246,12 @@ public:
     for (auto it: shape)
       len *= it;
     return len;
+  }
+
+  void set_data(const vector<T> &host) const {
+    size_t len = count();
+    assert(len == host.size());
+    assert(CUDA_SUCCESS == cuMemcpyHtoDAsync_v2((CUdeviceptr)d_data->get(), host.data(), len * sizeof(T), hStream));
   }
 
   vector<T> get_data() const {
@@ -278,7 +293,7 @@ public:
   }
 
   Tensor matmul(const Tensor<T> &that, bool transposeThis = false, bool transposeThat = false) const {
-    // ans = this * &that;
+    // ans = &that * this;
     const Tensor<T> *A = &that, *B = this;
     bool transposeA = transposeThat, transposeB = transposeThis;
 
@@ -456,12 +471,12 @@ class Dense {
   int channels;
 
 public:
-  Dense(int channels, int max_batch = 1024): channels(channels), w({1, 1}), bias({1, channels}, nullptr), ones({max_batch, 1}, 1.0f) {
+  Dense(int channels, int max_batch = 1024): channels(channels), w({1, 1}), bias({1, channels}, true), ones({max_batch, 1}, 1.0f) {
   }
 
   Tensor<float> forward(const Tensor<float> &x) {
     if (w.count() <= 1)
-      w = Tensor<float>({channels, x.shape[1]}, nullptr);
+      w = Tensor<float>({channels, x.shape[1]}, true);
 
     auto out = x.matmul(w, false, true);
     // out = x * w' + ones * bias';
@@ -530,9 +545,9 @@ public:
 
   void configure(int in_chans) {
     this->in_chans = in_chans;
-    w_krnl = Tensor<float>({in_chans * filters * kernel_size * kernel_size}, nullptr);
+    w_krnl = Tensor<float>({in_chans * filters * kernel_size * kernel_size}, true);
     if (use_bias)
-      w_bias = Tensor<float>({1, filters, 1, 1}, nullptr);
+      w_bias = Tensor<float>({1, filters, 1, 1}, true);
 
     cudnnCreateConvolutionDescriptor(&convDesc);
     cudnnSetConvolution2dDescriptor(convDesc, 0, 0, 1, 1, 1, 1, CUDNN_CROSS_CORRELATION, CUDNN_DATA_FLOAT);
