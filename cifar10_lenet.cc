@@ -287,22 +287,20 @@ public:
     assert(this->shape.size() == 2 && this->shape == outputs.shape);
 
     float posi = 1.0f / this->shape[0], nega = -1.0f / this->shape[0], batch = 1.0f / this->shape[0];
-    Tensor<T> loss = outputs;
-    assert(CUDNN_STATUS_SUCCESS == cudnnAddTensor(cudnnHandle,
-      &posi, this->dataTensor->get(), (float*)this->d_data->get(), &nega, loss.dataTensor->get(), (float*)loss.d_data->get()));
+    // Tensor<T> loss = outputs;
+    // assert(CUDNN_STATUS_SUCCESS == cudnnAddTensor(cudnnHandle,
+    //   &posi, this->dataTensor->get(), (float*)this->d_data->get(), &nega, loss.dataTensor->get(), (float*)loss.d_data->get()));
+
+    Tensor<T> loss(this->shape, 0.0f);
+    cublasSaxpy(cublasHandle, count(), &posi, (T*)this->d_data->get(), 1, (T*)loss.d_data->get(), 1);
+    cublasSaxpy(cublasHandle, count(), &nega, (T*)outputs.d_data->get(), 1, (T*)loss.d_data->get(), 1);
     return loss;
-
-    Tensor<T> ans(this->shape, 0.0f);
-
-    cublasSaxpy(cublasHandle, count(), &posi, (T*)this->d_data->get(), 1, (T*)ans.d_data->get(), 1);
-    cublasSaxpy(cublasHandle, count(), &nega, (T*)outputs.d_data->get(), 1, (T*)ans.d_data->get(), 1);
-    return ans;
 
     float alpha = -float(count() / this->shape[0]) / this->shape[0], beta = 0.0f;
     assert(CUDNN_STATUS_SUCCESS == cudnnSoftmaxBackward(cudnnHandle, CUDNN_SOFTMAX_ACCURATE, CUDNN_SOFTMAX_MODE_CHANNEL,
       &alpha, this->dataTensor->get(), (T*)this->d_data->get(), outputs.dataTensor->get(), (T*)outputs.d_data->get(),
-      &beta, ans.dataTensor->get(), (T*)ans.d_data->get()));
-    return ans;
+      &beta, loss.dataTensor->get(), (T*)loss.d_data->get()));
+    return loss;
   }
 
   Tensor softmaxForward() const {
