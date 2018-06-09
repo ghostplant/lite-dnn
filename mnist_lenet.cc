@@ -6,18 +6,20 @@
 
   Benchmark on Nvida Tesla P100:
 
-  --------------------------------------------------------------------------
-       Model      | batch_size  |    Keras + TF_CUDA    |  Lite-DNN (C++14)
-  --------------------------------------------------------------------------
-     mnist_mlp    |    32       |    8.34 sec/epoll     |  2.76 sec/epoll
-     mnist_cnn    |    128      |    3.24 sec/epoll     |  1.29 sec/epoll
-  --------------------------------------------------------------------------
+  ----------------------------------------------------------------------------
+       Model        | batch_size  |    Keras + TF_CUDA    |  Lite-DNN (C++14)
+  ----------------------------------------------------------------------------
+     mnist_mlp      |    32       |    8.34 sec/epoll     |  2.76 sec/epoll
+     mnist_cnn      |    128      |    3.24 sec/epoll     |  1.29 sec/epoll
+     cifar10_lenet  |    128      |    2.68 sec/epoll     |  1.15 sec/epoll
+  ----------------------------------------------------------------------------
 */
 
 #include <vector>
 #include <iostream>
 #include <memory>
 #include <random>
+#include <unordered_map>
 
 #include <stdio.h>
 #include <string.h>
@@ -31,33 +33,23 @@
 
 using namespace std;
 
-#define MNIST_IMAGES "/tmp/train-images-idx3-ubyte"
-#define MNIST_LABELS "/tmp/train-labels-idx1-ubyte"
 
-#define  SLOT_COUNT   29
-#define  LOG2(X)      (debruijn[((uint32_t)(((X) & -(X)) * 0x077CB531U)) >> 27])
+#define MNIST_IMAGES "/tmp/mnist-images-idx3-ubyte"
+#define MNIST_LABELS "/tmp/mnist-labels-idx1-ubyte"
+
+#define CIFAR10_IMAGES "/tmp/cifar10-images-idx4-ubyte"
+#define CIFAR10_LABELS "/tmp/cifar10-labels-idx1-ubyte"
+
+#define TRAIN_IMAGES CIFAR10_IMAGES
+#define TRAIN_LABELS CIFAR10_LABELS
+
 
 static cudnnHandle_t cudnnHandle;
 static cublasHandle_t cublasHandle;
 static CUstream hStream = NULL;
 static unsigned long lastClock;
-static vector<void*> block[SLOT_COUNT];
+static unordered_map<size_t, vector<void*>> cached_mem;
 
-static inline int get_slot(ssize_t bytes) {
-  static const int debruijn[32] = {0, 1, 28, 2, 29, 14, 24, 3, 30, 22, 20, 15, 25, 17, 4, 8, 31, 27, 13, 23, 21, 19, 16, 7, 26, 12, 18, 6, 11, 5, 10, 9};
-
-  bytes += sizeof(ssize_t) - 1;
-  bytes = bytes | (bytes >> 1);
-  bytes = bytes | (bytes >> 2);
-  bytes = bytes | (bytes >> 4);
-  bytes = bytes | (bytes >> 8);
-  bytes = bytes | (bytes >> 16);
-  ++bytes;
-
-  if (bytes < (1LU << SLOT_COUNT))
-    return LOG2(bytes);
-  return -1;
-}
 
 static inline unsigned long get_microseconds() {
   struct timeval tv;
@@ -65,66 +57,25 @@ static inline unsigned long get_microseconds() {
   return tv.tv_sec * 1000000LU + tv.tv_usec;
 }
 
-static pair<vector<uint8_t>, vector<uint8_t> > ReadUByteDataset(const char* image_filename, const char* label_filename) {
-  auto read_uint32 = [&](FILE *fp) {
-    uint32_t val;
-    assert(fread(&val, sizeof(val), 1, fp) == 1);
-    return __builtin_bswap32(val);
-  };
-
-  const int UBYTE_MAGIC = 0x800;
-  FILE *fp;
-  uint32_t header, length, h, w;
-  
-  assert((fp = fopen(image_filename, "rb")) != NULL);
-  header = read_uint32(fp);
-  length = read_uint32(fp);
-  h = read_uint32(fp);
-  w = read_uint32(fp);
-
-  pair<vector<uint8_t>, vector<uint8_t> > ans;
-  ans.first.resize(length * w * h);
-  ans.second.resize(length);
-
-  assert(header == UBYTE_MAGIC + 3);
-  assert(fread(ans.first.data(), 1, ans.first.size(), fp) == ans.first.size());
-  fclose(fp);
-
-  assert((fp = fopen(label_filename, "rb")) != NULL);
-  header = read_uint32(fp);
-  length = read_uint32(fp);
-
-  assert(header == UBYTE_MAGIC + 1);
-  assert(fread(ans.second.data(), 1, ans.second.size(), fp) == ans.second.size());
-  fclose(fp);
-
-  return move(ans);
-}
-
 
 class DeviceMemory {
   void *d_data;
-  int slot;
+  size_t length;
 
 public:
-  DeviceMemory(size_t length): d_data(NULL) {
+  DeviceMemory(size_t length): d_data(NULL), length(length) {
     if (length) {
-      slot = get_slot(length);
-      if (slot >= 0 && block[slot].size() > 0) {
-        void *ptr = block[slot].back();
-        block[slot].pop_back();
-        d_data = ptr;
-      } else
-        assert(CUDA_SUCCESS == cuMemAlloc_v2((CUdeviceptr*)&d_data, length));
+      auto& it = cached_mem[length]; if (it.size()) { d_data = it.back(); it.pop_back(); return; }
+
+      assert(CUDA_SUCCESS == cuMemAlloc_v2((CUdeviceptr*)&d_data, length));
     }
   }
 
   ~DeviceMemory() {
     if (d_data) {
-      if (slot >= 0)
-        block[slot].push_back(d_data);
-      else
-        assert(CUDA_SUCCESS == cuMemFree_v2((CUdeviceptr)d_data));
+      cached_mem[length].push_back(d_data); return;
+
+      assert(CUDA_SUCCESS == cuMemFree_v2((CUdeviceptr)d_data));
     }
   }
 
@@ -133,27 +84,26 @@ public:
   }
 };
 
+
 class TensorHandler {
   cudnnTensorDescriptor_t dataTensor;
-  vector<int> shape;
 
 public:
-  TensorHandler(const vector<int> &shape): shape(shape), dataTensor(NULL) {
+  TensorHandler(const vector<int> &shape) {
     assert(shape.size() <= 4);
-    while (this->shape.size() < 4)
-      this->shape.push_back(1);
+    int dims[4] = {1, 1, 1, 1};
+    for (int i = 0; i < shape.size(); ++i)
+      dims[i] = shape[i];
+    assert(CUDNN_STATUS_SUCCESS == cudnnCreateTensorDescriptor(&dataTensor));
+    assert(CUDNN_STATUS_SUCCESS == cudnnSetTensor4dDescriptor(dataTensor, CUDNN_TENSOR_NCHW, CUDNN_DATA_FLOAT,
+      dims[0], dims[1], dims[2], dims[3]));
   }
 
   ~TensorHandler() {
-    if (dataTensor)
-      assert(CUDNN_STATUS_SUCCESS == cudnnDestroyTensorDescriptor(dataTensor));
+    assert(CUDNN_STATUS_SUCCESS == cudnnDestroyTensorDescriptor(dataTensor));
   }
 
-  cudnnTensorDescriptor_t get() {
-    if (!dataTensor) {
-      assert(CUDNN_STATUS_SUCCESS == cudnnCreateTensorDescriptor(&dataTensor));
-      assert(CUDNN_STATUS_SUCCESS == cudnnSetTensor4dDescriptor(dataTensor, CUDNN_TENSOR_NCHW, CUDNN_DATA_FLOAT, shape[0], shape[1], shape[2], shape[3]));
-    }
+  cudnnTensorDescriptor_t get() const {
     return dataTensor;
   }
 };
@@ -252,6 +202,7 @@ public:
     size_t len = count();
     assert(len == host.size());
     assert(CUDA_SUCCESS == cuMemcpyHtoDAsync_v2((CUdeviceptr)d_data->get(), host.data(), len * sizeof(T), hStream));
+    assert(CUDA_SUCCESS == cuStreamSynchronize(hStream));
   }
 
   vector<T> get_data() const {
@@ -263,7 +214,6 @@ public:
   }
 
   void print(bool shapeOnly = false) const {
-    vector<T> host = get_data();
     cout << "<< shape=(";
     for (int i = 0; i < shape.size(); ++i)
       cout << shape[i] << (i + 1 < shape.size() ? ", " : ")");
@@ -272,6 +222,7 @@ public:
       cout << '\n';
       return;
     }
+    vector<T> host = get_data();
     for (int i = 0; i < host.size(); ++i) {
       if (fabs(host[i]) < 1e-8)
         host[i] = 0;
@@ -450,7 +401,7 @@ public:
   }
 
   Tensor<float> forward(const Tensor<float> &x) const {
-    assert(x.shape.size() == 4);
+    assert(x.shape.size() == 4 && x.shape[2] % stride == 0 && x.shape[3] % stride == 0);
 
     Tensor<float> ans({x.shape[0], x.shape[1], x.shape[2] / stride, x.shape[3] / stride});
     float alpha = 1.0f, beta = 0.0f;
@@ -507,7 +458,7 @@ public:
     return move(tensors);
   }
 
-  void learn(const vector<Tensor<float> > &tensors, float lr = -0.05) const {
+  void learn(const vector<Tensor<float> > &tensors, float lr = -0.01) const {
     assert(w.shape == tensors[0].shape);
     assert(CUBLAS_STATUS_SUCCESS == cublasSaxpy(cublasHandle, w.count(), &lr, (float*)tensors[0].d_data->get(), 1, (float*)w.d_data->get(), 1));
 
@@ -666,109 +617,228 @@ public:
 };
 
 
+static pair<vector<int>, vector<float>> ReadNormalDataset(const char* dataset) {
+  auto read_uint32 = [&](FILE *fp) {
+    uint32_t val;
+    assert(fread(&val, sizeof(val), 1, fp) == 1);
+    return __builtin_bswap32(val);
+  };
+
+  const int UBYTE_MAGIC = 0x800;
+  FILE *fp;
+  assert((fp = fopen(dataset, "rb")) != NULL);
+
+  uint32_t header, length;
+  header = read_uint32(fp);
+  length = read_uint32(fp);
+  header -= UBYTE_MAGIC;
+
+  assert(header >= 1 && header <= 4);
+  if (header == 1) { // output_shape = (N, max(val) + 1),  max(val) <= 255
+    vector<uint8_t> raw(length);
+    assert(fread(raw.data(), 1, raw.size(), fp) == raw.size());
+
+    uint32_t width = 0;
+    for (int i = 0; i < raw.size(); ++i)
+      width = max(width, (uint32_t)raw[i]);
+    ++width;
+
+    vector<int> shape = {(int)length, (int)width};
+    vector<float> tensor(length * width);
+    for (int i = 0; i < length; ++i)
+      tensor[i * width + raw[i]] = 1.0f;
+    return {move(shape), move(tensor)};
+
+  } else if (header == 2) { // shape = (N, C),  may support max(val) > 255
+    assert(0); // unsupported
+
+  } else if (header == 3) { // shape = (N, 1, H, W)
+    uint32_t h = read_uint32(fp);
+    uint32_t w = read_uint32(fp);
+    uint32_t width = h * w;
+
+    vector<int> shape = {(int)length, 1, (int)h, (int)w};
+    vector<float> tensor(length * width);
+    vector<uint8_t> raw(width);
+    for (int i = 0; i < length; ++i) {
+      assert(fread(raw.data(), 1, raw.size(), fp) == raw.size());
+      for (int j = 0; j < width; ++j)
+        tensor[i * width + j] = raw[j] / 255.0f;
+    }
+    return {move(shape), move(tensor)};
+
+  } else if (header == 4) { // shape = (N, C, H, W)
+    uint32_t c = read_uint32(fp);
+    uint32_t h = read_uint32(fp);
+    uint32_t w = read_uint32(fp);
+    uint32_t width = c * h * w;
+
+    vector<int> shape = {(int)length, (int)c, (int)h, (int)w};
+    vector<float> tensor(length * width);
+    vector<uint8_t> raw(width);
+    for (int i = 0; i < length; ++i) {
+      assert(fread(raw.data(), 1, raw.size(), fp) == raw.size());
+      for (int j = 0; j < width; ++j)
+        tensor[i * width + j] = raw[j] / 255.0f;
+    }
+    return {move(shape), move(tensor)};
+
+  }
+  assert(0);
+  return {{}, {}};
+}
+
+
 int main() {
   Tensor<float>::init();
 
-  Dense fc1(512), fc2(512), fc3(10);
   Flatten flatten;
-
-  Dense dense1(500), dense2(10);
   Activation relu(CUDNN_ACTIVATION_RELU);
   Pooling pooling(2, 2, CUDNN_POOLING_MAX);
-  Convolution cnn1(20, 5, true), cnn2(50, 5, true);
 
-  auto dataset = ReadUByteDataset(MNIST_IMAGES, MNIST_LABELS);
-  int samples = dataset.first.size() / 784;
-  printf("Total %d samples found.\n", samples);
+  // MNIST_MLP
+  Dense mnist_fc1(512), mnist_fc2(512), mnist_fc3(10);
 
-  int batch_size = 128;
-  int it = 0, epochs = 100, steps = (samples + batch_size - 1) / batch_size * epochs;
-  for (int k = 0; k < steps; ++k) {
-    vector<float> in(784 * batch_size), out(10 * batch_size);
-    memset(out.data(), 0, out.size() * sizeof(float));
+  // MNIST_CNN
+  Dense mnist_dense1(128), mnist_dense2(10);
+  Convolution mnist_cnn1(32, 3), mnist_cnn2(64, 3);
+
+  // CIFAR10_LENET
+  Dense lenet_dense1(512), lenet_dense2(10);
+  Convolution lenet_cnn1(32, 5, true), lenet_cnn2(64, 5, true);
+
+  auto full_images = ReadNormalDataset(TRAIN_IMAGES);
+  auto full_labels = ReadNormalDataset(TRAIN_LABELS);
+  assert(full_images.first[0] == full_labels.first[0]);
+
+  int samples = full_images.first[0];
+  int width = full_images.first[1] * full_images.first[2] * full_images.first[3];
+  int classes = full_labels.first[1];
+  printf("Total %d samples (%d, %d, %d) for %d classes found.\n", samples, full_images.first[1], full_images.first[2], full_images.first[3], classes);
+
+  int batch_size = 128, epochs = 100, steps = (samples + batch_size - 1) / batch_size * epochs;
+  for (int k = 0, it = 0; k < steps; ++k) {
+    vector<float> in(width * batch_size), out(classes * batch_size);
     for (int i = 0; i < batch_size; ++i, it = (it + 1) % samples) {
-      int lb = dataset.second[it * 1];
-      out[i * 10 + lb] = 1.0f;
-      for (int j = 0; j < 784; ++j)
-        in[i * 784 + j] = dataset.first[it * 784 + j] / 255.0;
+      assert(i * width + width <= in.size() && it * width + width <= full_images.second.size());
+      assert(i * classes + classes <= in.size() && it * classes + classes <= full_images.second.size());
+      memcpy(&in[i * width], &full_images.second[it * width], width * sizeof(float));
+      memcpy(&out[i * classes], &full_labels.second[it * classes], classes * sizeof(float));
     }
-    Tensor<float> images({batch_size, 1, 28, 28}, in), labels({batch_size, 10}, out);
+    Tensor<float> images({batch_size, full_images.first[1], full_images.first[2], full_images.first[3]}, in), labels({batch_size, classes}, out);
 
     float lr = - float(0.05f * pow((1.0f + 0.0001f * k), -0.75f));
 
-    // << MNIST_LENET >>
-
     auto y0 = images;
-    auto y1 = cnn1.forward(y0);
+    auto y1 = lenet_cnn1.forward(y0);
     auto y2 = pooling.forward(y1);
-    auto y3 = cnn2.forward(y2);
+    auto y3 = lenet_cnn2.forward(y2);
     auto y4 = pooling.forward(y3);
     auto y5 = flatten.forward(y4);
-    auto y6 = dense1.forward(y5);
+    auto y6 = lenet_dense1.forward(y5);
     auto y7 = relu.forward(y6);
-    auto y8 = dense2.forward(y7);
+    auto y8 = lenet_dense2.forward(y7);
     auto y9 = y8.softmaxForward();
 
     auto dy8 = y9.softmaxLoss(labels);
-    auto dy7pack = dense2.backward(dy8, y8, y7); dense2.learn(dy7pack, lr); auto dy7 = dy7pack.back();
+    auto dy7pack = lenet_dense2.backward(dy8, y8, y7); lenet_dense2.learn(dy7pack, lr); auto dy7 = dy7pack.back();
     auto dy6 = relu.backward(dy7, y7, y6);
-    auto dy5pack = dense1.backward(dy6, y6, y5); dense1.learn(dy5pack, lr); auto dy5 = dy5pack.back();
+    auto dy5pack = lenet_dense1.backward(dy6, y6, y5); lenet_dense1.learn(dy5pack, lr); auto dy5 = dy5pack.back();
     auto dy4 = flatten.backward(dy5, y5, y4);
     auto dy3 = pooling.backward(dy4, y4, y3);
-    auto dy2pack = cnn2.backward(dy3, y3, y2); cnn2.learn(dy2pack, lr); auto dy2 = dy2pack.back();
+    auto dy2pack = lenet_cnn2.backward(dy3, y3, y2); lenet_cnn2.learn(dy2pack, lr); auto dy2 = dy2pack.back();
     auto dy1 = pooling.backward(dy2, y2, y1);
-    auto dy0pack = cnn1.backward(dy1, y1, y0, true); cnn1.learn(dy0pack, lr); // auto dy0 = dy0pack.back();
+    auto dy0pack = lenet_cnn1.backward(dy1, y1, y0, true); lenet_cnn1.learn(dy0pack, lr); // auto dy0 = dy0pack.back();
 
     auto data_output = y8, data_loss = y9;
 
+
+    /* << MNIST_LENET >>
+    auto y0 = images;
+    auto y1 = lenet_cnn1.forward(y0);
+    auto y2 = pooling.forward(y1);
+    auto y3 = lenet_cnn2.forward(y2);
+    auto y4 = pooling.forward(y3);
+    auto y5 = flatten.forward(y4);
+    auto y6 = lenet_dense1.forward(y5);
+    auto y7 = relu.forward(y6);
+    auto y8 = lenet_dense2.forward(y7);
+    auto y9 = y8.softmaxForward();
+
+    auto dy8 = y9.softmaxLoss(labels);
+    auto dy7pack = lenet_dense2.backward(dy8, y8, y7); lenet_dense2.learn(dy7pack, lr); auto dy7 = dy7pack.back();
+    auto dy6 = relu.backward(dy7, y7, y6);
+    auto dy5pack = lenet_dense1.backward(dy6, y6, y5); lenet_dense1.learn(dy5pack, lr); auto dy5 = dy5pack.back();
+    auto dy4 = flatten.backward(dy5, y5, y4);
+    auto dy3 = pooling.backward(dy4, y4, y3);
+    auto dy2pack = lenet_cnn2.backward(dy3, y3, y2); lenet_cnn2.learn(dy2pack, lr); auto dy2 = dy2pack.back();
+    auto dy1 = pooling.backward(dy2, y2, y1);
+    auto dy0pack = lenet_cnn1.backward(dy1, y1, y0, true); lenet_cnn1.learn(dy0pack, lr); // auto dy0 = dy0pack.back();
+
+    auto data_output = y8, data_loss = y9;
+    */
+
     /* << MNIST_CNN >>
     auto y0 = images;
-    auto y1 = cnn1.forward(y0);
+    auto y1 = mnist_cnn1.forward(y0);
     auto y2 = relu.forward(y1);
-    auto y3 = cnn2.forward(y2);
+    auto y3 = mnist_cnn2.forward(y2);
     auto y4 = relu.forward(y3);
     auto y5 = pooling.forward(y4);
     auto y6 = flatten.forward(y5);
-    auto y7 = dense1.forward(y6);
+    auto y7 = mnist_dense1.forward(y6);
     auto y8 = relu.forward(y7);
-    auto y9 = dense2.forward(y8);
+    auto y9 = mnist_dense2.forward(y8);
     auto y10 = y9.softmaxForward();
 
     auto dy9 = y10.softmaxLoss(labels);
-    auto dy8pack = dense2.backward(dy9, y9, y8); dense2.learn(dy8pack); auto dy8 = dy8pack.back();
+    auto dy8pack = mnist_dense2.backward(dy9, y9, y8); mnist_dense2.learn(dy8pack, lr); auto dy8 = dy8pack.back();
     auto dy7 = relu.backward(dy8, y8, y7);
-    auto dy6pack = dense1.backward(dy7, y7, y6); dense1.learn(dy6pack); auto dy6 = dy6pack.back();
+    auto dy6pack = mnist_dense1.backward(dy7, y7, y6); mnist_dense1.learn(dy6pack, lr); auto dy6 = dy6pack.back();
     auto dy5 = flatten.backward(dy6, y6, y5);
     auto dy4 = pooling.backward(dy5, y5, y4);
     auto dy3 = relu.backward(dy4, y4, y3);
-    auto dy2pack = cnn2.backward(dy3, y3, y2); cnn2.learn(dy2pack); auto dy2 = dy2pack.back();
+    auto dy2pack = mnist_cnn2.backward(dy3, y3, y2); mnist_cnn2.learn(dy2pack, lr); auto dy2 = dy2pack.back();
     auto dy1 = relu.backward(dy2, y2, y1);
-    auto dy0pack = cnn1.backward(dy1, y1, y0, true); cnn1.learn(dy0pack); // auto dy0 = dy0pack.back();
+    auto dy0pack = mnist_cnn1.backward(dy1, y1, y0, true); mnist_cnn1.learn(dy0pack, lr); // auto dy0 = dy0pack.back();
 
     auto data_output = y9, data_loss = y10;
     */
 
-
     /* << MNIST_MLP >>
-    auto y0 = pooling.forward(images).reshape({batch_size, 784 / 4}); // images.reshape({batch_size, 784});
-    auto y1 = fc1.forward(y0);
+    auto y0 = flatten.forward(images);
+    auto y1 = mnist_fc1.forward(y0);
     auto y2 = relu.forward(y1);
-    auto y3 = dense1.forward(y2);
+    auto y3 = mnist_fc2.forward(y2);
     auto y4 = relu.forward(y3);
-    auto y5 = dense2.forward(y4);
+    auto y5 = mnist_fc3.forward(y4);
     auto y6 = y5.softmaxForward();
 
     auto dy5 = y6.softmaxLoss(labels);
-    auto dy4pack = dense2.backward(dy5, y4, y4); dense2.learn(dy4pack); auto dy4 = dy4pack.back();
+    auto dy4pack = mnist_fc3.backward(dy5, y4, y4); mnist_fc3.learn(dy4pack, lr); auto dy4 = dy4pack.back();
     auto dy3 = relu.backward(dy4, y4, y3);
-    auto dy2pack = dense1.backward(dy3, y3, y2); dense1.learn(dy2pack); auto dy2 = dy2pack.back();
+    auto dy2pack = mnist_fc2.backward(dy3, y3, y2); mnist_fc2.learn(dy2pack, lr); auto dy2 = dy2pack.back();
     auto dy1 = relu.backward(dy2, y2, y1);
-    auto dy0pack = fc1.backward(dy1, y1, y0); fc1.learn(dy0pack); auto dy0 = dy0pack.back();
+    auto dy0pack = mnist_fc1.backward(dy1, y1, y0); mnist_fc1.learn(dy0pack, lr); auto dy0 = dy0pack.back();
 
     auto data_output = y5, data_loss = y6;
     */
 
     if (it < batch_size) {
+      int tot = 0, acc = 0;
+      vector<float> pred_data = data_output.get_data();
+      for (int i = 0; i < batch_size; ++i) {
+        int it = 0, jt = 0;
+        for (int j = 1; j < classes; ++j) {
+          if (pred_data[i * classes + it] < pred_data[i * classes + j])
+            it = j;
+          if (out[i * classes + jt] < out[i * classes + j])
+            jt = j;
+        }
+        ++tot;
+        if (it == jt)
+          ++acc;
+      }
 
       vector<float> loss_data = data_loss.get_data();
       float loss = 0.0f;
@@ -779,22 +849,7 @@ int main() {
       }
       loss /= data_loss.shape[0];
 
-      vector<float> pred_data = data_output.get_data();
-      int tot = 0, acc = 0;
-      for (int i = 0; i < batch_size; ++i) {
-        int it = 0, jt = 0;
-        for (int j = 1; j < 10; ++j) {
-          if (pred_data[i * 10 + it] < pred_data[i * 10 + j])
-            it = j;
-          if (out[i * 10 + jt] < out[i * 10 + j])
-            jt = j;
-        }
-        ++tot;
-        if (it == jt)
-          ++acc;
-      }
       static int epoch = 0;
-
       unsigned long currClock = get_microseconds();
       printf("epoch = %d: loss = %.4f, acc = %.2f%%, time = %.4fs\n", ++epoch, loss, acc * 100.0f / tot, (currClock - lastClock) * 1e-6f);
       lastClock = currClock;
