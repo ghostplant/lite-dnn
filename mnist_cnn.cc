@@ -6,18 +6,20 @@
 
   Benchmark on Nvida Tesla P100:
 
-  --------------------------------------------------------------------------
-       Model      | batch_size  |    Keras + TF_CUDA    |  Lite-DNN (C++14)
-  --------------------------------------------------------------------------
-     mnist_mlp    |    32       |    8.34 sec/epoll     |  2.76 sec/epoll
-     mnist_cnn    |    128      |    3.24 sec/epoll     |  1.29 sec/epoll
-  --------------------------------------------------------------------------
+  ----------------------------------------------------------------------------
+       Model        | batch_size  |    Keras + TF_CUDA    |  Lite-DNN (C++14)
+  ----------------------------------------------------------------------------
+     mnist_mlp      |    32       |    8.34 sec/epoll     |  1.03 sec/epoll
+     mnist_cnn      |    128      |    3.24 sec/epoll     |  1.31 sec/epoll
+     cifar10_lenet  |    128      |    2.68 sec/epoll     |  1.15 sec/epoll
+  ----------------------------------------------------------------------------
 */
 
 #include <vector>
 #include <iostream>
 #include <memory>
 #include <random>
+#include <unordered_map>
 
 #include <stdio.h>
 #include <string.h>
@@ -31,33 +33,23 @@
 
 using namespace std;
 
-#define MNIST_IMAGES "/tmp/train-images-idx3-ubyte"
-#define MNIST_LABELS "/tmp/train-labels-idx1-ubyte"
 
-#define  SLOT_COUNT   29
-#define  LOG2(X)      (debruijn[((uint32_t)(((X) & -(X)) * 0x077CB531U)) >> 27])
+#define MNIST_IMAGES "/tmp/mnist-images-idx3-ubyte"
+#define MNIST_LABELS "/tmp/mnist-labels-idx1-ubyte"
+
+#define CIFAR10_IMAGES "/tmp/cifar10-images-idx4-ubyte"
+#define CIFAR10_LABELS "/tmp/cifar10-labels-idx1-ubyte"
+
+#define TRAIN_IMAGES MNIST_IMAGES
+#define TRAIN_LABELS MNIST_LABELS
+
 
 static cudnnHandle_t cudnnHandle;
 static cublasHandle_t cublasHandle;
 static CUstream hStream = NULL;
 static unsigned long lastClock;
-static vector<void*> block[SLOT_COUNT];
+static unordered_map<size_t, vector<void*>> cached_mem;
 
-static inline int get_slot(ssize_t bytes) {
-  static const int debruijn[32] = {0, 1, 28, 2, 29, 14, 24, 3, 30, 22, 20, 15, 25, 17, 4, 8, 31, 27, 13, 23, 21, 19, 16, 7, 26, 12, 18, 6, 11, 5, 10, 9};
-
-  bytes += sizeof(ssize_t) - 1;
-  bytes = bytes | (bytes >> 1);
-  bytes = bytes | (bytes >> 2);
-  bytes = bytes | (bytes >> 4);
-  bytes = bytes | (bytes >> 8);
-  bytes = bytes | (bytes >> 16);
-  ++bytes;
-
-  if (bytes < (1LU << SLOT_COUNT))
-    return LOG2(bytes);
-  return -1;
-}
 
 static inline unsigned long get_microseconds() {
   struct timeval tv;
@@ -65,66 +57,25 @@ static inline unsigned long get_microseconds() {
   return tv.tv_sec * 1000000LU + tv.tv_usec;
 }
 
-static pair<vector<uint8_t>, vector<uint8_t> > ReadUByteDataset(const char* image_filename, const char* label_filename) {
-  auto read_uint32 = [&](FILE *fp) {
-    uint32_t val;
-    assert(fread(&val, sizeof(val), 1, fp) == 1);
-    return __builtin_bswap32(val);
-  };
-
-  const int UBYTE_MAGIC = 0x800;
-  FILE *fp;
-  uint32_t header, length, h, w;
-  
-  assert((fp = fopen(image_filename, "rb")) != NULL);
-  header = read_uint32(fp);
-  length = read_uint32(fp);
-  h = read_uint32(fp);
-  w = read_uint32(fp);
-
-  pair<vector<uint8_t>, vector<uint8_t> > ans;
-  ans.first.resize(length * w * h);
-  ans.second.resize(length);
-
-  assert(header == UBYTE_MAGIC + 3);
-  assert(fread(ans.first.data(), 1, ans.first.size(), fp) == ans.first.size());
-  fclose(fp);
-
-  assert((fp = fopen(label_filename, "rb")) != NULL);
-  header = read_uint32(fp);
-  length = read_uint32(fp);
-
-  assert(header == UBYTE_MAGIC + 1);
-  assert(fread(ans.second.data(), 1, ans.second.size(), fp) == ans.second.size());
-  fclose(fp);
-
-  return move(ans);
-}
-
 
 class DeviceMemory {
   void *d_data;
-  int slot;
+  size_t length;
 
 public:
-  DeviceMemory(size_t length): d_data(NULL) {
+  DeviceMemory(size_t length): d_data(NULL), length(length) {
     if (length) {
-      slot = get_slot(length);
-      if (slot >= 0 && block[slot].size() > 0) {
-        void *ptr = block[slot].back();
-        block[slot].pop_back();
-        d_data = ptr;
-      } else
-        assert(CUDA_SUCCESS == cuMemAlloc_v2((CUdeviceptr*)&d_data, length));
+      auto& it = cached_mem[length]; if (it.size()) { d_data = it.back(); it.pop_back(); return; }
+
+      assert(CUDA_SUCCESS == cuMemAlloc_v2((CUdeviceptr*)&d_data, length));
     }
   }
 
   ~DeviceMemory() {
     if (d_data) {
-      if (slot >= 0)
-        block[slot].push_back(d_data);
-      else
-        assert(CUDA_SUCCESS == cuMemFree_v2((CUdeviceptr)d_data));
+      cached_mem[length].push_back(d_data); return;
+
+      assert(CUDA_SUCCESS == cuMemFree_v2((CUdeviceptr)d_data));
     }
   }
 
@@ -133,27 +84,26 @@ public:
   }
 };
 
+
 class TensorHandler {
   cudnnTensorDescriptor_t dataTensor;
-  vector<int> shape;
 
 public:
-  TensorHandler(const vector<int> &shape): shape(shape), dataTensor(NULL) {
+  TensorHandler(const vector<int> &shape) {
     assert(shape.size() <= 4);
-    while (this->shape.size() < 4)
-      this->shape.push_back(1);
+    int dims[4] = {1, 1, 1, 1};
+    for (int i = 0; i < shape.size(); ++i)
+      dims[i] = shape[i];
+    assert(CUDNN_STATUS_SUCCESS == cudnnCreateTensorDescriptor(&dataTensor));
+    assert(CUDNN_STATUS_SUCCESS == cudnnSetTensor4dDescriptor(dataTensor, CUDNN_TENSOR_NCHW, CUDNN_DATA_FLOAT,
+      dims[0], dims[1], dims[2], dims[3]));
   }
 
   ~TensorHandler() {
-    if (dataTensor)
-      assert(CUDNN_STATUS_SUCCESS == cudnnDestroyTensorDescriptor(dataTensor));
+    assert(CUDNN_STATUS_SUCCESS == cudnnDestroyTensorDescriptor(dataTensor));
   }
 
-  cudnnTensorDescriptor_t get() {
-    if (!dataTensor) {
-      assert(CUDNN_STATUS_SUCCESS == cudnnCreateTensorDescriptor(&dataTensor));
-      assert(CUDNN_STATUS_SUCCESS == cudnnSetTensor4dDescriptor(dataTensor, CUDNN_TENSOR_NCHW, CUDNN_DATA_FLOAT, shape[0], shape[1], shape[2], shape[3]));
-    }
+  cudnnTensorDescriptor_t get() const {
     return dataTensor;
   }
 };
@@ -191,17 +141,17 @@ public:
   }
 
 
-  Tensor(const vector<int> &shape, bool random = false) {
+  Tensor(const vector<int> &shape, bool random = false, T range = 0) {
     size_t len = setup_tensor(shape);
 
     if (!random)
       return;
 
-    float range = sqrt(3.0f / len);
-
     auto random_uniform = [&](int size) {
       vector<float> r(size);
       float avg1 = 0.0f, avg2 = 0.0f, dev;
+      if (!range)
+        range = sqrt(3.0 / size);
 
       for (int i = 0; i < r.size(); ++i) {
         r[i] = rand() / float(RAND_MAX);
@@ -210,7 +160,7 @@ public:
       avg1 /= r.size(), avg2 /= r.size(), dev = sqrt(avg2 - avg1 * avg1);
 
       for (int i = 0; i < r.size(); ++i)
-        r[i] = (r[i] - avg1) * range / dev;
+        r[i] = (r[i] - avg1) / dev * range;
       return move(r);
     };
 
@@ -252,6 +202,7 @@ public:
     size_t len = count();
     assert(len == host.size());
     assert(CUDA_SUCCESS == cuMemcpyHtoDAsync_v2((CUdeviceptr)d_data->get(), host.data(), len * sizeof(T), hStream));
+    assert(CUDA_SUCCESS == cuStreamSynchronize(hStream));
   }
 
   vector<T> get_data() const {
@@ -263,7 +214,6 @@ public:
   }
 
   void print(bool shapeOnly = false) const {
-    vector<T> host = get_data();
     cout << "<< shape=(";
     for (int i = 0; i < shape.size(); ++i)
       cout << shape[i] << (i + 1 < shape.size() ? ", " : ")");
@@ -272,11 +222,16 @@ public:
       cout << '\n';
       return;
     }
+    vector<T> host = get_data();
     for (int i = 0; i < host.size(); ++i) {
       if (fabs(host[i]) < 1e-8)
         host[i] = 0;
-      cout << host[i] << (i + 1 < host.size() ? ' ' : '\n');
-      if (i >= 32 && i + 1 < host.size()) {
+      if ((i & 7) == 0)
+        cout << '\n';
+      cout << int(1e3 * host[i]) * 1e-3 << '\t';
+      if (i + 1 == host.size())
+        cout << '\n';
+      if (i >= 100 && i + 1 < host.size()) {
         cout << "...\n";
         break;
       }
@@ -290,6 +245,12 @@ public:
     if (!weak)
       assert(mat.count() == count());
     return move(mat);
+  }
+
+  Tensor copy() const {
+    Tensor<T> ans(this->shape);
+    assert(CUDA_SUCCESS == cuMemcpyDtoDAsync_v2((CUdeviceptr)ans.d_data->get(), (CUdeviceptr)this->d_data->get(), ans.count() * sizeof(T), hStream));
+    return move(ans);
   }
 
   Tensor matmul(const Tensor<T> &that, bool transposeThis = false, bool transposeThat = false) const {
@@ -321,80 +282,76 @@ public:
 
   Tensor matadd(const Tensor<T> &that) const {
     assert(this->shape == that.shape);
-    Tensor ans(this->shape, 0);
     float alpha = 1.0f;
+    Tensor ans(this->shape, 0.0f);
     assert(CUBLAS_STATUS_SUCCESS == cublasSaxpy(cublasHandle, count(), &alpha, (T*)this->d_data->get(), 1, (T*)ans.d_data->get(), 1));
+    // Tensor ans = this->copy();
     assert(CUBLAS_STATUS_SUCCESS == cublasSaxpy(cublasHandle, count(), &alpha, (T*)that.d_data->get(), 1, (T*)ans.d_data->get(), 1));
     return ans;
   }
+};
 
-  Tensor softmaxLoss(Tensor<T> &outputs) const {
-    assert(this->shape.size() == 2 && this->shape == outputs.shape);
 
-    float posi = 1.0f / this->shape[0], nega = -1.0f / this->shape[0], batch = 1.0f / this->shape[0];
-    Tensor<T> loss = outputs;
-    assert(CUDNN_STATUS_SUCCESS == cudnnAddTensor(cudnnHandle,
-      &posi, this->dataTensor->get(), (float*)this->d_data->get(), &nega, loss.dataTensor->get(), (float*)loss.d_data->get()));
-    return loss;
+class Layer {
 
-    Tensor<T> ans(this->shape, 0.0f);
+public:
+  virtual Tensor<float> forward(const Tensor<float> &x) = 0;
 
-    cublasSaxpy(cublasHandle, count(), &posi, (T*)this->d_data->get(), 1, (T*)ans.d_data->get(), 1);
-    cublasSaxpy(cublasHandle, count(), &nega, (T*)outputs.d_data->get(), 1, (T*)ans.d_data->get(), 1);
-    return ans;
+  virtual vector<Tensor<float> > backward(const Tensor<float> &dy, const Tensor<float> &y, const Tensor<float> &x, bool lastLayer = false) = 0;
 
-    float alpha = -float(count() / this->shape[0]) / this->shape[0], beta = 0.0f;
-    assert(CUDNN_STATUS_SUCCESS == cudnnSoftmaxBackward(cudnnHandle, CUDNN_SOFTMAX_ACCURATE, CUDNN_SOFTMAX_MODE_CHANNEL,
-      &alpha, this->dataTensor->get(), (T*)this->d_data->get(), outputs.dataTensor->get(), (T*)outputs.d_data->get(),
-      &beta, ans.dataTensor->get(), (T*)ans.d_data->get()));
-    return ans;
+  virtual void learn(const vector<Tensor<float> > &tensors, float lr) = 0;
+};
+
+
+class Softmax {
+
+public:
+  Softmax() {
   }
 
-  Tensor softmaxForward() const {
+  ~Softmax() {
+  }
+
+  Tensor<float> forward(const Tensor<float> &x) const {
     float alpha = 1.0f, beta = 0.0f;
 
-    Tensor<T> ans(this->shape);
+    Tensor<float> ans(x.shape);
 
     assert(CUDNN_STATUS_SUCCESS == cudnnSoftmaxForward(cudnnHandle, CUDNN_SOFTMAX_ACCURATE, CUDNN_SOFTMAX_MODE_CHANNEL,
-        &alpha, dataTensor->get(), (T*)this->d_data->get(), &beta, dataTensor->get(), (T*)ans.d_data->get()));
+        &alpha, x.dataTensor->get(), (float*)x.d_data->get(), &beta, ans.dataTensor->get(), (float*)ans.d_data->get()));
     return ans;
   }
 
-  Tensor lrnCrossForward(unsigned depthRadius, float bias, float lrnAlpha, float lrnBeta) const {
-    assert(this->shape.size() == 4);
+  Tensor<float> backward(const Tensor<float> &dy, const Tensor<float> &y, const Tensor<float> &x, bool lastLayer = false) const {
+    if (lastLayer)
+      return dy;
 
+    Tensor<float> dx(x.shape, 0.0f);
+    // float alpha = -float(count() / this->shape[0]) / this->shape[0], beta = 0.0f;
     float alpha = 1.0f, beta = 0.0f;
-
-    Tensor<T> ans(this->shape);
-
-    unsigned lrnN = 2 * depthRadius + 1;
-    assert(bias > 1e-5);
-    cudnnLRNDescriptor_t lrnDesc;
-    cudnnCreateLRNDescriptor(&lrnDesc);
-    assert(CUDNN_STATUS_SUCCESS == cudnnSetLRNDescriptor(lrnDesc, lrnN, lrnAlpha * lrnN, lrnBeta, bias));
-    assert(CUDNN_STATUS_SUCCESS == cudnnLRNCrossChannelForward(cudnnHandle, lrnDesc, CUDNN_LRN_CROSS_CHANNEL_DIM1,
-        &alpha, this->dataTensor->get(), (T*)this->d_data->get(), &beta, ans.dataTensor->get(), (T*)ans.d_data->get()));
-    cudnnDestroyLRNDescriptor(lrnDesc);
-    return ans;
+    assert(CUDNN_STATUS_SUCCESS == cudnnSoftmaxBackward(cudnnHandle, CUDNN_SOFTMAX_ACCURATE, CUDNN_SOFTMAX_MODE_CHANNEL,
+      &alpha, y.dataTensor->get(), (float*)y.d_data->get(), dy.dataTensor->get(), (float*)dy.d_data->get(),
+      &beta, dx.dataTensor->get(), (float*)dx.d_data->get()));
+    return dx;
   }
 
-  Tensor lrnCrossBackward(const Tensor<T> &tensorPost, const Tensor<T> &tensorPre, unsigned depthRadius, float bias, float lrnAlpha, float lrnBeta) const {
-    assert(this->shape.size() == 4);
+  Tensor<float> loss(const Tensor<float> &x, const Tensor<float> &y_real) const {
+    assert(x.shape == y_real.shape);
 
-    float alpha = 1.0f, beta = 0.0f;
+    float posi = 1.0f / x.shape[0], nega = -1.0f / x.shape[0], batch = 1.0f / x.shape[0];
+    size_t len = x.count();
 
-    Tensor<T> ans(this->shape);
+    // Tensor<float> loss = y_real;
+    // assert(CUDNN_STATUS_SUCCESS == cudnnAddTensor(cudnnHandle,
+    //   &posi, this->dataTensor->get(), (float*)this->d_data->get(), &nega, loss.dataTensor->get(), (float*)loss.d_data->get()));
 
-    unsigned lrnN = 2 * depthRadius + 1;
-    assert(bias >= CUDNN_LRN_MIN_K && lrnBeta >= CUDNN_LRN_MIN_BETA && lrnN >= CUDNN_LRN_MIN_N && lrnN <= CUDNN_LRN_MAX_N);
-    cudnnLRNDescriptor_t lrnDesc;
-    cudnnCreateLRNDescriptor(&lrnDesc);
-    assert(CUDNN_STATUS_SUCCESS == cudnnSetLRNDescriptor(lrnDesc, lrnN, lrnAlpha * lrnN, lrnBeta, bias));
-    assert(CUDNN_STATUS_SUCCESS == cudnnLRNCrossChannelBackward(cudnnHandle, lrnDesc, CUDNN_LRN_CROSS_CHANNEL_DIM1,
-        &alpha, tensorPost.dataTensor->get(), (T*)tensorPost.d_data->get(), this->dataTensor->get(), (T*)this->d_data->get(),
-        &beta, tensorPre.dataTensor->get(), (T*)tensorPre.d_data->get(), ans.dataTensor->get(), (T*)ans.d_data->get()));
-    cudnnDestroyLRNDescriptor(lrnDesc);
-    return ans;
+    Tensor<float> loss(x.shape, 0.0f);
+    cublasSaxpy(cublasHandle, len, &posi, (float*)x.d_data->get(), 1, (float*)loss.d_data->get(), 1);
+    cublasSaxpy(cublasHandle, len, &nega, (float*)y_real.d_data->get(), 1, (float*)loss.d_data->get(), 1);
+    return loss;
+  }
+
+  void learn(const vector<Tensor<float> > &tensors, float lr) {
   }
 };
 
@@ -431,12 +388,52 @@ public:
 };
 
 
+class LRN {
+  unsigned lrnN;
+  float bias, lrnAlpha, lrnBeta;
+  cudnnLRNDescriptor_t lrnDesc;
+
+public:
+  LRN(unsigned depthRadius, float bias, float lrnAlpha, float lrnBeta):
+      lrnN(2 * depthRadius + 1), bias(bias), lrnAlpha(lrnAlpha), lrnBeta(lrnBeta) {
+    assert(bias >= CUDNN_LRN_MIN_K && lrnBeta >= CUDNN_LRN_MIN_BETA && lrnN >= CUDNN_LRN_MIN_N && lrnN <= CUDNN_LRN_MAX_N);
+    assert(CUDNN_STATUS_SUCCESS == cudnnCreateLRNDescriptor(&lrnDesc));
+    assert(CUDNN_STATUS_SUCCESS == cudnnSetLRNDescriptor(lrnDesc, lrnN, lrnAlpha * lrnN, lrnBeta, bias));
+  }
+
+  ~LRN() {
+    assert(CUDNN_STATUS_SUCCESS == cudnnDestroyLRNDescriptor(lrnDesc));
+  }
+
+  Tensor<float> forward(const Tensor<float> &x) const {
+    assert(x.shape.size() == 4);
+
+    Tensor<float> y(x.shape);
+    float alpha = 1.0f, beta = 0.0f;
+    assert(CUDNN_STATUS_SUCCESS == cudnnLRNCrossChannelForward(cudnnHandle, lrnDesc, CUDNN_LRN_CROSS_CHANNEL_DIM1,
+        &alpha, x.dataTensor->get(), (float*)x.d_data->get(), &beta, y.dataTensor->get(), (float*)y.d_data->get()));
+    return move(y);
+  }
+
+  Tensor<float> backward(const Tensor<float> &dy, const Tensor<float> &y, const Tensor<float> &x, bool lastLayer = false) const {
+    Tensor<float> dx(x.shape);
+    if (lastLayer)
+      return dx;
+    float alpha = 1.0f, beta = 0.0f;
+    assert(CUDNN_STATUS_SUCCESS == cudnnLRNCrossChannelBackward(cudnnHandle, lrnDesc, CUDNN_LRN_CROSS_CHANNEL_DIM1,
+        &alpha, y.dataTensor->get(), (float*)y.d_data->get(), dy.dataTensor->get(), (float*)dy.d_data->get(),
+        x.dataTensor->get(), (float*)x.d_data->get(), &beta, dx.dataTensor->get(), (float*)dx.d_data->get()));
+    return move(dx);
+  }
+};
+
+
 class Pooling {
-  int stride;
+  int size, stride;
   cudnnPoolingDescriptor_t poolDesc;
 
 public:
-  Pooling(int size, int stride, cudnnPoolingMode_t mode = CUDNN_POOLING_MAX): stride(stride) {
+  Pooling(int size, int stride, cudnnPoolingMode_t mode = CUDNN_POOLING_MAX): size(size), stride(stride) {
     assert(CUDNN_STATUS_SUCCESS == cudnnCreatePoolingDescriptor(&poolDesc));
     assert(CUDNN_STATUS_SUCCESS == cudnnSetPooling2dDescriptor(poolDesc, mode, CUDNN_PROPAGATE_NAN, size, size, 0, 0, stride, stride));
   }
@@ -447,8 +444,9 @@ public:
 
   Tensor<float> forward(const Tensor<float> &x) const {
     assert(x.shape.size() == 4);
+    // assert((x.shape[2] - (size - stride)) % stride == 0 && (x.shape[3] - (size - stride)) % stride == 0);
 
-    Tensor<float> ans({x.shape[0], x.shape[1], x.shape[2] / stride, x.shape[3] / stride});
+    Tensor<float> ans({x.shape[0], x.shape[1], (x.shape[2] - (size - stride)) / stride, (x.shape[3] - (size - stride)) / stride});
     float alpha = 1.0f, beta = 0.0f;
     assert(CUDNN_STATUS_SUCCESS == cudnnPoolingForward(cudnnHandle, poolDesc, &alpha, x.dataTensor->get(), (float*)x.d_data->get(), &beta, ans.dataTensor->get(), (float*)ans.d_data->get()));
     return move(ans);
@@ -466,22 +464,76 @@ public:
 };
 
 
-class Dense {
-  Tensor<float> w, bias, ones;
-  int channels;
+class Dropout {
+  cudnnDropoutDescriptor_t dropDesc;
+
+  shared_ptr<DeviceMemory> states, reversed;
+  size_t states_size, reversed_size;
+  uint64_t seed; float drop_prob;
 
 public:
-  Dense(int channels, int max_batch = 1024): channels(channels), w({1, 1}), bias({1, channels}, true), ones({max_batch, 1}, 1.0f) {
+  Dropout(float drop_prob = 0.1f, uint64_t seed = 10): reversed_size(~0LU), seed(seed), drop_prob(drop_prob) {
+    assert(CUDNN_STATUS_SUCCESS == cudnnCreateDropoutDescriptor(&dropDesc));
+    assert(CUDNN_STATUS_SUCCESS == cudnnDropoutGetStatesSize(cudnnHandle, &states_size));
+
+    states = make_shared<DeviceMemory>(states_size);
+    assert(CUDNN_STATUS_SUCCESS == cudnnSetDropoutDescriptor(dropDesc, cudnnHandle, drop_prob, states->get(), states_size, seed));
+  }
+
+  ~Dropout() {
+    assert(CUDNN_STATUS_SUCCESS == cudnnDestroyDropoutDescriptor(dropDesc));
   }
 
   Tensor<float> forward(const Tensor<float> &x) {
-    if (w.count() <= 1)
+    size_t _reversed_size;
+    assert(CUDNN_STATUS_SUCCESS == cudnnDropoutGetReserveSpaceSize(x.dataTensor->get(), &_reversed_size));
+    if (~reversed_size)
+      assert(_reversed_size == reversed_size);
+    else {
+      reversed_size = _reversed_size;
+      reversed = make_shared<DeviceMemory>(states_size);
+    }
+
+    Tensor<float> ans(x.shape);
+    assert(CUDNN_STATUS_SUCCESS == cudnnDropoutForward(cudnnHandle, dropDesc, x.dataTensor->get(), (float*)x.d_data->get(),
+      ans.dataTensor->get(), (float*)ans.d_data->get(), reversed->get(), reversed_size));
+    return move(ans);
+  }
+
+  Tensor<float> backward(const Tensor<float> &dy, const Tensor<float> &y, const Tensor<float> &x, bool lastLayer = false) {
+    assert(CUDNN_STATUS_SUCCESS == cudnnRestoreDropoutDescriptor(dropDesc, cudnnHandle, drop_prob, states->get(), states_size, seed));
+    size_t _reversed_size;
+    assert(CUDNN_STATUS_SUCCESS == cudnnDropoutGetReserveSpaceSize(y.dataTensor->get(), &_reversed_size));
+    assert(_reversed_size == reversed_size);
+
+    if (lastLayer)
+      return dy;
+    Tensor<float> dx(x.shape);
+    assert(CUDNN_STATUS_SUCCESS == cudnnDropoutBackward(cudnnHandle, dropDesc, dy.dataTensor->get(), (float*)dy.d_data->get(),
+      dx.dataTensor->get(), (float*)dx.d_data->get(), reversed->get(), reversed_size));
+    return move(dx);
+  }
+};
+
+
+class Dense {
+  Tensor<float> w, bias, ones, g_bias, g_w;
+  int channels;
+
+public:
+  Dense(int channels, int max_batch = 1024): channels(channels), bias({1, channels}, true), ones({max_batch, 1}, 1.0f), w({1, 1}), g_bias({1, 1}), g_w({1, 1}) {
+  }
+
+  Tensor<float> forward(const Tensor<float> &x) {
+    if (w.count() <= 1) {
       w = Tensor<float>({channels, x.shape[1]}, true);
+      g_w = Tensor<float>(w.shape);
+      g_bias = Tensor<float>(bias.shape);
+    }
 
     auto out = x.matmul(w, false, true);
     // out = x * w' + ones * bias';
     assert(out.shape.size() == 2 && bias.shape.size() == 2 && out.shape[1] == bias.shape[1] && out.shape[0] <= ones.shape[0]);
-    // return out.matadd(ones.matmul(bias));
 
     float alpha = 1.0f;
     cublasSgemm(cublasHandle,
@@ -495,21 +547,20 @@ public:
     return move(out);
   }
 
-  vector<Tensor<float> > backward(const Tensor<float> &dy, const Tensor<float> &y, const Tensor<float> &x, bool lastLayer = false) {
-    vector<Tensor<float> > tensors;
-    tensors.push_back(dy.matmul(x, true, false));
-    tensors.push_back(ones.reshape({x.shape[0], 1}, true).matmul(dy, true, false));
-    if (!lastLayer)
-      tensors.push_back(dy.matmul(w));
-    return move(tensors);
+  Tensor<float> backward(const Tensor<float> &dy, const Tensor<float> &y, const Tensor<float> &x, bool lastLayer = false) {
+    g_w = dy.matmul(x, true, false);
+    g_bias = ones.reshape({x.shape[0], 1}, true).matmul(dy, true, false);
+    if (lastLayer)
+      return dy;
+    return dy.matmul(w);
   }
 
-  void learn(const vector<Tensor<float> > &tensors, float lr = -0.05) const {
-    assert(w.shape == tensors[0].shape);
-    assert(CUBLAS_STATUS_SUCCESS == cublasSaxpy(cublasHandle, w.count(), &lr, (float*)tensors[0].d_data->get(), 1, (float*)w.d_data->get(), 1));
+  void learn(float lr = -0.01) const {
+    assert(w.shape == g_w.shape);
+    assert(CUBLAS_STATUS_SUCCESS == cublasSaxpy(cublasHandle, w.count(), &lr, (float*)g_w.d_data->get(), 1, (float*)w.d_data->get(), 1));
 
-    assert(bias.shape == tensors[1].shape);
-    assert(CUBLAS_STATUS_SUCCESS == cublasSaxpy(cublasHandle, bias.count(), &lr, (float*)tensors[1].d_data->get(), 1, (float*)bias.d_data->get(), 1));
+    assert(bias.shape == g_bias.shape);
+    assert(CUBLAS_STATUS_SUCCESS == cublasSaxpy(cublasHandle, bias.count(), &lr, (float*)g_bias.d_data->get(), 1, (float*)bias.d_data->get(), 1));
   }
 };
 
@@ -532,26 +583,29 @@ public:
 
 class Convolution {
   int filters, in_chans, kernel_size;
-  Tensor<float> w_krnl, w_bias;
+  Tensor<float> w_krnl, w_bias, g_krnl, g_bias;
   bool use_bias;
 
   cudnnConvolutionDescriptor_t convDesc;
   cudnnFilterDescriptor_t filterDesc;
 
 public:
-  Convolution(int filters, int kernel_size, bool use_bias = false): w_krnl({1, 1}), w_bias({1, 1}),
+  Convolution(int filters, int kernel_size, bool use_bias = false): w_krnl({1, 1}), w_bias({1, 1}), g_krnl({1, 1}), g_bias({1, 1}),
       filters(filters), kernel_size(kernel_size), in_chans(-1), convDesc(NULL), filterDesc(NULL), use_bias(use_bias) {
   }
 
   void configure(int in_chans) {
     this->in_chans = in_chans;
     w_krnl = Tensor<float>({in_chans * filters * kernel_size * kernel_size}, true);
-    if (use_bias)
+    g_krnl = Tensor<float>(w_krnl.shape);
+    if (use_bias) {
       w_bias = Tensor<float>({1, filters, 1, 1}, true);
+      g_bias = Tensor<float>(w_bias.shape);
+    }
 
     cudnnCreateConvolutionDescriptor(&convDesc);
     cudnnSetConvolution2dDescriptor(convDesc, 0, 0, 1, 1, 1, 1, CUDNN_CROSS_CORRELATION, CUDNN_DATA_FLOAT);
-    assert(CUDNN_STATUS_SUCCESS == cudnnSetConvolutionMathType(convDesc, CUDNN_TENSOR_OP_MATH));
+    // assert(CUDNN_STATUS_SUCCESS == cudnnSetConvolutionMathType(convDesc, CUDNN_TENSOR_OP_MATH));
 
     cudnnCreateFilterDescriptor(&filterDesc);
     cudnnSetFilter4dDescriptor(filterDesc, CUDNN_DATA_FLOAT, CUDNN_TENSOR_NCHW,
@@ -594,12 +648,10 @@ public:
     return move(ans);
   }
 
-  vector<Tensor<float> > backward(const Tensor<float> &dy, const Tensor<float> &y, const Tensor<float> &x, bool lastLayer = false) const {
+  Tensor<float> backward(const Tensor<float> &dy, const Tensor<float> &y, const Tensor<float> &x, bool lastLayer = false) const {
     float alpha = 1.0f, beta = 0.0f;
     assert(y.shape[1] == filters);
     int n = x.shape[0], c = x.shape[1], h = x.shape[2], w = x.shape[3];
-
-    Tensor<float> grad(w_krnl.shape), dx({n, c, h, w});
 
     cudnnConvolutionBwdFilterAlgo_t falgo;
     cudnnConvolutionBwdDataAlgo_t dalgo;
@@ -627,117 +679,313 @@ public:
                 x.dataTensor->get(), (float*)x.d_data->get(),
                 dy.dataTensor->get(), (float*)dy.d_data->get(),
                 convDesc, falgo, workspace.get(), maxSizeInBytes, &beta,
-                filterDesc, (float*)grad.d_data->get()));
-
-    vector<Tensor<float> > tensors;
-    tensors.push_back(move(grad));
+                filterDesc, (float*)g_krnl.d_data->get()));
 
     if (use_bias) {
-        Tensor<float> bias(w_bias.shape);
         assert(CUDNN_STATUS_SUCCESS == cudnnConvolutionBackwardBias(cudnnHandle, &alpha,
                 dy.dataTensor->get(), (float*)dy.d_data->get(), &beta,
-                bias.dataTensor->get(), (float*)bias.d_data->get()));
-        tensors.push_back(move(bias));
+                g_bias.dataTensor->get(), (float*)g_bias.d_data->get()));
     }
 
-    if (!lastLayer) {
-      assert(CUDNN_STATUS_SUCCESS == cudnnConvolutionBackwardData(cudnnHandle, &alpha,
+    if (lastLayer)
+      return dy;
+
+    Tensor<float> dx({n, c, h, w});
+    assert(CUDNN_STATUS_SUCCESS == cudnnConvolutionBackwardData(cudnnHandle, &alpha,
                 filterDesc, (float*)w_krnl.d_data->get(),
                 dy.dataTensor->get(), (float*)dy.d_data->get(),
                 convDesc, dalgo, workspace.get(), maxSizeInBytes, &beta,
                 dx.dataTensor->get(), (float*)dx.d_data->get()));
-      tensors.push_back(move(dx));
-    }
-    return move(tensors);
+    return move(dx);
   }
 
-  void learn(const vector<Tensor<float> > &tensors, float lr = -0.05) const {
-    assert(w_krnl.shape == tensors[0].shape);
-    assert(CUBLAS_STATUS_SUCCESS == cublasSaxpy(cublasHandle, w_krnl.count(), &lr, (float*)tensors[0].d_data->get(), 1, (float*)w_krnl.d_data->get(), 1));
+  void learn(float lr = -0.05) const {
+    assert(w_krnl.shape == g_krnl.shape);
+    assert(CUBLAS_STATUS_SUCCESS == cublasSaxpy(cublasHandle, w_krnl.count(), &lr, (float*)g_krnl.d_data->get(), 1, (float*)w_krnl.d_data->get(), 1));
 
     if (use_bias) {
-      assert(w_bias.shape == tensors[1].shape);
-      assert(CUBLAS_STATUS_SUCCESS == cublasSaxpy(cublasHandle, w_bias.count(), &lr, (float*)tensors[1].d_data->get(), 1, (float*)w_bias.d_data->get(), 1));
+      assert(w_bias.shape == g_bias.shape);
+      assert(CUBLAS_STATUS_SUCCESS == cublasSaxpy(cublasHandle, w_bias.count(), &lr, (float*)g_bias.d_data->get(), 1, (float*)w_bias.d_data->get(), 1));
     }
   }
 };
 
 
+static pair<vector<int>, vector<float>> ReadNormalDataset(const char* dataset) {
+  auto read_uint32 = [&](FILE *fp) {
+    uint32_t val;
+    assert(fread(&val, sizeof(val), 1, fp) == 1);
+    return __builtin_bswap32(val);
+  };
+
+  const int UBYTE_MAGIC = 0x800;
+  FILE *fp;
+  assert((fp = fopen(dataset, "rb")) != NULL);
+
+  uint32_t header, length;
+  header = read_uint32(fp);
+  length = read_uint32(fp);
+  header -= UBYTE_MAGIC;
+
+  assert(header >= 1 && header <= 4);
+  if (header == 1) { // output_shape = (N, max(val) + 1),  max(val) <= 255
+    vector<uint8_t> raw(length);
+    assert(fread(raw.data(), 1, raw.size(), fp) == raw.size());
+
+    uint32_t width = 0;
+    for (int i = 0; i < raw.size(); ++i)
+      width = max(width, (uint32_t)raw[i]);
+    ++width;
+
+    vector<int> shape = {(int)length, (int)width};
+    vector<float> tensor(length * width);
+    for (int i = 0; i < length; ++i)
+      tensor[i * width + raw[i]] = 1.0f;
+    return {move(shape), move(tensor)};
+
+  } else if (header == 2) { // shape = (N, C),  may support max(val) > 255
+    assert(0); // unsupported
+
+  } else if (header == 3) { // shape = (N, 1, H, W)
+    uint32_t h = read_uint32(fp);
+    uint32_t w = read_uint32(fp);
+    uint32_t width = h * w;
+
+    vector<int> shape = {(int)length, 1, (int)h, (int)w};
+    vector<float> tensor(length * width);
+    vector<uint8_t> raw(width);
+    for (int i = 0; i < length; ++i) {
+      assert(fread(raw.data(), 1, raw.size(), fp) == raw.size());
+      for (int j = 0; j < width; ++j)
+        tensor[i * width + j] = raw[j] / 255.0f;
+    }
+    return {move(shape), move(tensor)};
+
+  } else if (header == 4) { // shape = (N, C, H, W)
+    uint32_t c = read_uint32(fp);
+    uint32_t h = read_uint32(fp);
+    uint32_t w = read_uint32(fp);
+    uint32_t width = c * h * w;
+
+    vector<int> shape = {(int)length, (int)c, (int)h, (int)w};
+    vector<float> tensor(length * width);
+    vector<uint8_t> raw(width);
+    for (int i = 0; i < length; ++i) {
+      assert(fread(raw.data(), 1, raw.size(), fp) == raw.size());
+      for (int j = 0; j < width; ++j)
+        tensor[i * width + j] = raw[j] / 255.0f;
+    }
+    return {move(shape), move(tensor)};
+
+  }
+  assert(0);
+  return {{}, {}};
+}
+
+
 int main() {
   Tensor<float>::init();
 
-  Dense fc1(512), fc2(512), fc3(10);
+  Softmax softmax;
   Flatten flatten;
-
-  Dense dense1(128), dense2(10);
   Activation relu(CUDNN_ACTIVATION_RELU);
   Pooling pooling(2, 2, CUDNN_POOLING_MAX);
-  Convolution cnn1(32, 3), cnn2(64, 3);
+  Dropout drop1, drop2;
 
-  auto dataset = ReadUByteDataset(MNIST_IMAGES, MNIST_LABELS);
-  int samples = dataset.first.size() / 784;
-  printf("Total %d samples found.\n", samples);
+  // MNIST_MLP
+  Dense mnist_fc1(512), mnist_fc2(512), mnist_fc3(10);
 
-  int batch_size = 128;
-  int it = 0, epochs = 100, steps = (samples + batch_size - 1) / batch_size * epochs;
-  for (int k = 0; k < steps; ++k) {
-    vector<float> in(784 * batch_size), out(10 * batch_size);
-    memset(out.data(), 0, out.size() * sizeof(float));
+  // MNIST_CNN
+  Dense mnist_dense1(128), mnist_dense2(10);
+  Convolution mnist_cnn1(32, 3), mnist_cnn2(64, 3);
+
+  // CIFAR10_LENET
+  Dense lenet_dense1(512), lenet_dense2(10);
+  Convolution lenet_cnn1(32, 5, true), lenet_cnn2(64, 5, true);
+
+  // CIFAR10_ALEXNET
+  Pooling alex_pooling(3, 2, CUDNN_POOLING_MAX);
+  LRN alex_lrn(4, 1.0, 0.001 / 9.0, 0.75);
+  Dense alex_fc1(384), alex_fc2(192), alex_fc3(10);
+  Convolution alex_cnn1(64, 5, true), alex_cnn2(64, 5, true);
+
+  auto full_images = ReadNormalDataset(TRAIN_IMAGES);
+  auto full_labels = ReadNormalDataset(TRAIN_LABELS);
+  assert(full_images.first[0] == full_labels.first[0]);
+
+  int samples = full_images.first[0];
+  int width = full_images.first[1] * full_images.first[2] * full_images.first[3];
+  int classes = full_labels.first[1];
+  printf("Total %d samples (%d, %d, %d) for %d classes found.\n", samples, full_images.first[1], full_images.first[2], full_images.first[3], classes);
+
+  int batch_size = 128, epochs = 100, steps = (samples + batch_size - 1) / batch_size * epochs;
+  for (int k = 0, it = 0; k < steps; ++k) {
+    vector<float> in(width * batch_size), out(classes * batch_size);
     for (int i = 0; i < batch_size; ++i, it = (it + 1) % samples) {
-      int lb = dataset.second[it * 1];
-      out[i * 10 + lb] = 1.0f;
-      for (int j = 0; j < 784; ++j)
-        in[i * 784 + j] = dataset.first[it * 784 + j] / 255.0;
+      assert(i * width + width <= in.size() && it * width + width <= full_images.second.size());
+      assert(i * classes + classes <= in.size() && it * classes + classes <= full_images.second.size());
+      memcpy(&in[i * width], &full_images.second[it * width], width * sizeof(float));
+      memcpy(&out[i * classes], &full_labels.second[it * classes], classes * sizeof(float));
     }
-    Tensor<float> images({batch_size, 1, 28, 28}, in), labels({batch_size, 10}, out);
+    Tensor<float> images({batch_size, full_images.first[1], full_images.first[2], full_images.first[3]}, in), labels({batch_size, classes}, out);
 
-    // << MNIST_CNN >>
+    float lr = - float(0.05f * pow((1.0f + 0.0001f * k), -0.75f));
+
+
     auto y0 = images;
-    auto y1 = cnn1.forward(y0);
+    auto y1 = mnist_cnn1.forward(y0);
     auto y2 = relu.forward(y1);
-    auto y3 = cnn2.forward(y2);
+    auto y3 = mnist_cnn2.forward(y2);
     auto y4 = relu.forward(y3);
     auto y5 = pooling.forward(y4);
     auto y6 = flatten.forward(y5);
-    auto y7 = dense1.forward(y6);
+    auto y7 = mnist_dense1.forward(y6);
     auto y8 = relu.forward(y7);
-    auto y9 = dense2.forward(y8);
-    auto y10 = y9.softmaxForward();
+    auto y9 = mnist_dense2.forward(y8);
+    auto y10 = softmax.forward(y9);
 
-    auto dy9 = y10.softmaxLoss(labels);
-    auto dy8pack = dense2.backward(dy9, y9, y8); dense2.learn(dy8pack); auto dy8 = dy8pack.back();
+    auto dy9 = softmax.loss(y10, labels);
+    auto dy8 = mnist_dense2.backward(dy9, y9, y8); mnist_dense2.learn(lr);
     auto dy7 = relu.backward(dy8, y8, y7);
-    auto dy6pack = dense1.backward(dy7, y7, y6); dense1.learn(dy6pack); auto dy6 = dy6pack.back();
+    auto dy6 = mnist_dense1.backward(dy7, y7, y6); mnist_dense1.learn(lr);
     auto dy5 = flatten.backward(dy6, y6, y5);
     auto dy4 = pooling.backward(dy5, y5, y4);
     auto dy3 = relu.backward(dy4, y4, y3);
-    auto dy2pack = cnn2.backward(dy3, y3, y2); cnn2.learn(dy2pack); auto dy2 = dy2pack.back();
+    auto dy2 = mnist_cnn2.backward(dy3, y3, y2); mnist_cnn2.learn(lr);
     auto dy1 = relu.backward(dy2, y2, y1);
-    auto dy0pack = cnn1.backward(dy1, y1, y0, true); cnn1.learn(dy0pack); // auto dy0 = dy0pack.back();
+    auto dy0 = mnist_cnn1.backward(dy1, y1, y0, true); mnist_cnn1.learn(lr);
 
     auto data_output = y9, data_loss = y10;
 
+    /* << CIFAR10_ALEXNET >>
+    auto y0 = images;
+    auto y1 = alex_cnn1     .forward(y0); // 64x28x28
+    auto y2 = relu          .forward(y1); // 64x28x28
+    auto y3 = alex_pooling  .forward(y2); // 64x13x13
+    auto y4 = alex_lrn      .forward(y3); // 64x13x13
+    auto y5 = alex_cnn2     .forward(y4); // 64x9x9
+    auto y6 = relu          .forward(y5); // 64x28x28
+    auto y7 = alex_lrn      .forward(y6); // 64x9x9
+    auto y8 = alex_pooling  .forward(y7); // 64x4x4
+    auto y9 = flatten       .forward(y8); // 1024
+    auto y10 = alex_fc1     .forward(y9); // 384
+    auto y11 = relu         .forward(y10); // 64x28x28
+    auto y12 = alex_fc2     .forward(y11); // 192
+    auto y13 = relu         .forward(y12); // 64x28x28
+    auto y14 = alex_fc3     .forward(y13); // 10
+    auto y15 = softmax      .forward(y14); // 10
+
+    auto dy14 = softmax.loss(y15, labels);
+    auto dy13pack = alex_fc3.backward(dy14, y14, y13); alex_fc3.learn(dy13pack, lr); auto dy13 = dy13pack.back();
+    auto dy12 = relu.backward(dy13, y13, y12);
+    auto dy11pack = alex_fc2.backward(dy12, y12, y11); alex_fc2.learn(dy11pack, lr); auto dy11 = dy11pack.back();
+    auto dy10 = relu.backward(dy11, y11, y10);
+    auto dy9pack = alex_fc1.backward(dy10, y10, y9); alex_fc1.learn(dy9pack, lr); auto dy9 = dy9pack.back();
+    auto dy8 = flatten.backward(dy9, y9, y8);
+    auto dy7 = alex_pooling.backward(dy8, y8, y7);
+    auto dy6 = alex_lrn.backward(dy7, y7, y6);
+    auto dy5 = relu.backward(dy6, y6, y5);
+    auto dy4pack = alex_cnn2.backward(dy5, y5, y4); alex_cnn2.learn(dy4pack, lr); auto dy4 = dy4pack.back();
+    auto dy3 = alex_lrn.backward(dy4, y4, y3);
+    auto dy2 = alex_pooling.backward(dy3, y3, y2);
+    auto dy1 = relu.backward(dy2, y2, y1);
+    auto dy0pack = alex_cnn1.backward(dy1, y1, y0, true); alex_cnn1.learn(dy0pack, lr); // auto dy0 = dy0pack.back();
+
+    auto data_output = y14, data_loss = y15;
+    */
+
+
+    /* << MNIST_LENET >>
+    auto y0 = images;
+    auto y1 = lenet_cnn1.forward(y0);
+    auto y2 = pooling.forward(y1);
+    auto y3 = lenet_cnn2.forward(y2);
+    auto y4 = pooling.forward(y3);
+    auto y5 = flatten.forward(y4);
+    auto y6 = lenet_dense1.forward(y5);
+    auto y7 = relu.forward(y6);
+    auto y8 = lenet_dense2.forward(y7);
+    auto y9 = softmax.forward(y8);
+
+    auto dy8 = softmax.loss(y9, labels);
+    auto dy7pack = lenet_dense2.backward(dy8, y8, y7); lenet_dense2.learn(dy7pack, lr); auto dy7 = dy7pack.back();
+    auto dy6 = relu.backward(dy7, y7, y6);
+    auto dy5pack = lenet_dense1.backward(dy6, y6, y5); lenet_dense1.learn(dy5pack, lr); auto dy5 = dy5pack.back();
+    auto dy4 = flatten.backward(dy5, y5, y4);
+    auto dy3 = pooling.backward(dy4, y4, y3);
+    auto dy2pack = lenet_cnn2.backward(dy3, y3, y2); lenet_cnn2.learn(dy2pack, lr); auto dy2 = dy2pack.back();
+    auto dy1 = pooling.backward(dy2, y2, y1);
+    auto dy0pack = lenet_cnn1.backward(dy1, y1, y0, true); lenet_cnn1.learn(dy0pack, lr); // auto dy0 = dy0pack.back();
+
+    auto data_output = y8, data_loss = y9;
+    */
+
+    /* << MNIST_CNN >>
+    auto y0 = images;
+    auto y1 = mnist_cnn1.forward(y0);
+    auto y2 = relu.forward(y1);
+    auto y3 = mnist_cnn2.forward(y2);
+    auto y4 = relu.forward(y3);
+    auto y5 = pooling.forward(y4);
+    auto y6 = flatten.forward(y5);
+    auto y7 = mnist_dense1.forward(y6);
+    auto y8 = relu.forward(y7);
+    auto y9 = mnist_dense2.forward(y8);
+    auto y10 = softmax.forward(y9);
+
+    auto dy9 = softmax.loss(y10, labels);
+    auto dy8 = mnist_dense2.backward(dy9, y9, y8); mnist_dense2.learn(lr);
+    auto dy7 = relu.backward(dy8, y8, y7);
+    auto dy6 = mnist_dense1.backward(dy7, y7, y6); mnist_dense1.learn(lr);
+    auto dy5 = flatten.backward(dy6, y6, y5);
+    auto dy4 = pooling.backward(dy5, y5, y4);
+    auto dy3 = relu.backward(dy4, y4, y3);
+    auto dy2 = mnist_cnn2.backward(dy3, y3, y2); mnist_cnn2.learn(lr);
+    auto dy1 = relu.backward(dy2, y2, y1);
+    auto dy0 = mnist_cnn1.backward(dy1, y1, y0, true); mnist_cnn1.learn(lr);
+
+    auto data_output = y9, data_loss = y10;
+    */
 
     /* << MNIST_MLP >>
-    auto y0 = pooling.forward(images).reshape({batch_size, 784 / 4}); // images.reshape({batch_size, 784});
-    auto y1 = fc1.forward(y0);
+    auto y0 = flatten.forward(images);
+    auto y1 = mnist_fc1.forward(y0);
     auto y2 = relu.forward(y1);
-    auto y3 = dense1.forward(y2);
+    auto y2mid = drop1.forward(y2);
+    auto y3 = mnist_fc2.forward(y2mid);
     auto y4 = relu.forward(y3);
-    auto y5 = dense2.forward(y4);
-    auto y6 = y5.softmaxForward();
+    auto y4mid = drop2.forward(y2);
+    auto y5 = mnist_fc3.forward(y4);
+    auto y6 = softmax.forward(y5);
 
-    auto dy5 = y6.softmaxLoss(labels);
-    auto dy4pack = dense2.backward(dy5, y4, y4); dense2.learn(dy4pack); auto dy4 = dy4pack.back();
+    auto dy5 = softmax.loss(y6, labels);
+    auto dy4mid = mnist_fc3.backward(dy5, y4, y4); mnist_fc3.learn(lr);
+    auto dy4 = drop2.backward(dy4mid, y4mid, y3);
     auto dy3 = relu.backward(dy4, y4, y3);
-    auto dy2pack = dense1.backward(dy3, y3, y2); dense1.learn(dy2pack); auto dy2 = dy2pack.back();
+    auto dy2mid = mnist_fc2.backward(dy3, y3, y2); mnist_fc2.learn(lr);
+    auto dy2 = drop1.backward(dy2mid, y2mid, y2);
     auto dy1 = relu.backward(dy2, y2, y1);
-    auto dy0pack = fc1.backward(dy1, y1, y0); fc1.learn(dy0pack); auto dy0 = dy0pack.back();
+    auto dy0 = mnist_fc1.backward(dy1, y1, y0, true); mnist_fc1.learn(lr);
 
     auto data_output = y5, data_loss = y6;
     */
 
     if (it < batch_size) {
+      int tot = 0, acc = 0;
+      vector<float> pred_data = data_output.get_data();
+      for (int i = 0; i < batch_size; ++i) {
+        int it = 0, jt = 0;
+        for (int j = 1; j < classes; ++j) {
+          if (pred_data[i * classes + it] < pred_data[i * classes + j])
+            it = j;
+          if (out[i * classes + jt] < out[i * classes + j])
+            jt = j;
+        }
+        ++tot;
+        if (it == jt)
+          ++acc;
+      }
+
       vector<float> loss_data = data_loss.get_data();
       float loss = 0.0f;
       for (int i = 0; i < loss_data.size(); ++i) {
@@ -747,22 +995,7 @@ int main() {
       }
       loss /= data_loss.shape[0];
 
-      vector<float> pred_data = data_output.get_data();
-      int tot = 0, acc = 0;
-      for (int i = 0; i < batch_size; ++i) {
-        int it = 0, jt = 0;
-        for (int j = 1; j < 10; ++j) {
-          if (pred_data[i * 10 + it] < pred_data[i * 10 + j])
-            it = j;
-          if (out[i * 10 + jt] < out[i * 10 + j])
-            jt = j;
-        }
-        ++tot;
-        if (it == jt)
-          ++acc;
-      }
       static int epoch = 0;
-
       unsigned long currClock = get_microseconds();
       printf("epoch = %d: loss = %.4f, acc = %.2f%%, time = %.4fs\n", ++epoch, loss, acc * 100.0f / tot, (currClock - lastClock) * 1e-6f);
       lastClock = currClock;
