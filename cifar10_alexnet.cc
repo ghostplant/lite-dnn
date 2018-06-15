@@ -144,31 +144,29 @@ public:
   Tensor(): shape({0}) {
   }
 
-  Tensor(const vector<int> &shape, bool random = false, T range = 0) {
+  Tensor(const vector<int> &shape, bool random = false) {
     size_t len = setup_tensor(shape);
 
     if (!random)
       return;
 
-    auto random_uniform = [&](int size) {
-      srand(size);
-      vector<float> r(size);
-      float avg1 = 0.0f, avg2 = 0.0f, dev;
-      if (!range)
-        range = sqrt(3.0 / size);
+    // glorot_normal
+    float receptive = 0.5f;
+    for (int i = 2; i < shape.size(); ++i)
+      receptive *= shape[i];
+    float limit = sqrt(3.0f / max(1.0f, (shape[0] + shape[1]) * receptive));
 
-      for (int i = 0; i < r.size(); ++i) {
-        r[i] = rand() / float(RAND_MAX);
-        avg1 += r[i], avg2 += r[i] * r[i];
-      }
-      avg1 /= r.size(), avg2 /= r.size(), dev = sqrt(avg2 - avg1 * avg1);
+    auto random_uniform = [&]() {
+      // srand(shape.size());
+      // devi = sqrt(avg2 - avg1 * avg1);
 
+      vector<float> r(len);
       for (int i = 0; i < r.size(); ++i)
-        r[i] = (r[i] - avg1) / dev * range;
+        r[i] = rand() * 2.0f * limit / RAND_MAX - limit;
       return move(r);
     };
 
-    set_data(random_uniform(len));
+    set_data(random_uniform());
   }
 
   Tensor(const vector<int> &shape, const vector<T> &host) {
@@ -533,16 +531,18 @@ public:
 class Dense: public Layer {
   Tensor<float> w, bias, ones, g_bias, g_w;
   int channels;
+  const char *kernel_init;
 
 public:
-  Dense(int channels, int max_batch = 1024): channels(channels), bias({1, channels}, true), ones({max_batch, 1}, 1.0f), w(), g_bias(), g_w() {
+  Dense(int channels, const char *kernel_init = NULL, int max_batch = 1024): channels(channels), kernel_init(kernel_init), ones({max_batch, 1}, 1.0f), bias({1, channels}, 0.0f), g_bias({1, channels}), w(), g_w() {
   }
 
   Tensor<float> forward(const Tensor<float> &x) {
     if (w.count() < 1) {
-      w = Tensor<float>({channels, x.shape[1]}, true);
-      g_w = Tensor<float>(w.shape);
-      g_bias = Tensor<float>(bias.shape);
+      if (!kernel_init)
+        w = Tensor<float>({channels, x.shape[1]}, true);
+      else
+        w = Tensor<float>({channels, x.shape[1]}, (float)atof(kernel_init));
     }
 
     auto out = x.matmul(w, false, true);
@@ -615,7 +615,7 @@ public:
     w_krnl = Tensor<float>({in_chans * filters * kernel_size * kernel_size}, true);
     g_krnl = Tensor<float>(w_krnl.shape);
     if (use_bias) {
-      w_bias = Tensor<float>({1, filters, 1, 1}, true);
+      w_bias = Tensor<float>({1, filters, 1, 1}, 0.0f);
       g_bias = Tensor<float>(w_bias.shape);
     }
 
@@ -848,12 +848,15 @@ vector<shared_ptr<Layer>> create_model() {
   layers.push_back(make_shared<Convolution>(64, 3));
   layers.push_back(make_shared<Activation>(CUDNN_ACTIVATION_RELU));
   layers.push_back(make_shared<Pooling>(2, 2, CUDNN_POOLING_MAX));
+  layers.push_back(make_shared<Dropout>(0.25));
   layers.push_back(make_shared<Flatten>());
   layers.push_back(make_shared<Dense>(128));
   layers.push_back(make_shared<Activation>(CUDNN_ACTIVATION_RELU));
+  layers.push_back(make_shared<Dropout>(0.5));
   layers.push_back(make_shared<Dense>(10));
   layers.push_back(make_shared<Softmax>());
   */
+
   return move(layers);
 }
 
@@ -872,7 +875,7 @@ int main() {
   auto model = create_model();
 
   vector<Tensor<float>> input(model.size() + 1), dloss(model.size() + 1);
-  int batch_size = 128, epochs = 100, steps = (samples + batch_size - 1) / batch_size * epochs;
+  int batch_size = 128, epochs = 50, steps = (samples + batch_size - 1) / batch_size * epochs;
   for (int k = 0, it = 0; k < steps; ++k) {
     vector<float> in(width * batch_size), out(classes * batch_size);
     for (int i = 0; i < batch_size; ++i, it = (it + 1) % samples) {
@@ -888,11 +891,12 @@ int main() {
     input[0] = images;
     for (int i = 0; i < model.size(); ++i)
       input[i + 1] = model[i]->forward(input[i]);
+    auto data_output = input.back();
 
     dloss[model.size()] = model.back()->backward(input.back(), labels, input.back());
     for (int i = model.size() - 1; i >= 1; --i)
       dloss[i] = model[i - 1]->backward(dloss[i + 1], input[i], input[i - 1], i == 1), model[i - 1]->learn(lr);
-    auto data_output = input.back(), data_loss = dloss.back();
+    auto data_loss = dloss.back();
 
     if (it < batch_size) {
       int tot = 0, acc = 0;
