@@ -141,30 +141,32 @@ public:
   }
 
 
-  Tensor(const vector<int> &shape, bool random = false, T range = 0) {
+  Tensor(): shape({0}) {
+  }
+
+  Tensor(const vector<int> &shape, bool random = false) {
     size_t len = setup_tensor(shape);
 
     if (!random)
       return;
 
-    auto random_uniform = [&](int size) {
-      vector<float> r(size);
-      float avg1 = 0.0f, avg2 = 0.0f, dev;
-      if (!range)
-        range = sqrt(3.0 / size);
+    // glorot_normal
+    float receptive = 0.5f;
+    for (int i = 2; i < shape.size(); ++i)
+      receptive *= shape[i];
+    float limit = sqrt(3.0f / max(1.0f, (shape[0] + shape[1]) * receptive));
 
-      for (int i = 0; i < r.size(); ++i) {
-        r[i] = rand() / float(RAND_MAX);
-        avg1 += r[i], avg2 += r[i] * r[i];
-      }
-      avg1 /= r.size(), avg2 /= r.size(), dev = sqrt(avg2 - avg1 * avg1);
+    auto random_uniform = [&]() {
+      // srand(shape.size());
+      // devi = sqrt(avg2 - avg1 * avg1);
 
+      vector<float> r(len);
       for (int i = 0; i < r.size(); ++i)
-        r[i] = (r[i] - avg1) / dev * range;
+        r[i] = rand() * 2.0f * limit / RAND_MAX - limit;
       return move(r);
     };
 
-    set_data(random_uniform(len));
+    set_data(random_uniform());
   }
 
   Tensor(const vector<int> &shape, const vector<T> &host) {
@@ -297,13 +299,13 @@ class Layer {
 public:
   virtual Tensor<float> forward(const Tensor<float> &x) = 0;
 
-  virtual vector<Tensor<float> > backward(const Tensor<float> &dy, const Tensor<float> &y, const Tensor<float> &x, bool lastLayer = false) = 0;
+  virtual Tensor<float> backward(const Tensor<float> &dy, const Tensor<float> &y, const Tensor<float> &x, bool lastLayer = false) = 0;
 
-  virtual void learn(const vector<Tensor<float> > &tensors, float lr) = 0;
+  virtual void learn(float lr) const = 0;
 };
 
 
-class Softmax {
+class Softmax: public Layer {
 
 public:
   Softmax() {
@@ -312,7 +314,7 @@ public:
   ~Softmax() {
   }
 
-  Tensor<float> forward(const Tensor<float> &x) const {
+  Tensor<float> forward(const Tensor<float> &x) {
     float alpha = 1.0f, beta = 0.0f;
 
     Tensor<float> ans(x.shape);
@@ -322,8 +324,22 @@ public:
     return ans;
   }
 
-  Tensor<float> backward(const Tensor<float> &dy, const Tensor<float> &y, const Tensor<float> &x, bool lastLayer = false) const {
-    if (lastLayer)
+  Tensor<float> backward(const Tensor<float> &dy, const Tensor<float> &y, const Tensor<float> &x, bool lastLayer = false) {
+    assert(x.shape == y.shape);
+
+    float posi = 1.0f / x.shape[0], nega = -1.0f / x.shape[0], batch = 1.0f / x.shape[0];
+    size_t len = x.count();
+
+    // Tensor<float> dx = y;
+    // assert(CUDNN_STATUS_SUCCESS == cudnnAddTensor(cudnnHandle,
+    //   &posi, this->dataTensor->get(), (float*)this->d_data->get(), &nega, dx.dataTensor->get(), (float*)dx.d_data->get()));
+
+    Tensor<float> dx(x.shape, 0.0f);
+    cublasSaxpy(cublasHandle, len, &posi, (float*)x.d_data->get(), 1, (float*)dx.d_data->get(), 1);
+    cublasSaxpy(cublasHandle, len, &nega, (float*)y.d_data->get(), 1, (float*)dx.d_data->get(), 1);
+    return move(dx);
+
+    /*if (lastLayer)
       return dy;
 
     Tensor<float> dx(x.shape, 0.0f);
@@ -332,31 +348,15 @@ public:
     assert(CUDNN_STATUS_SUCCESS == cudnnSoftmaxBackward(cudnnHandle, CUDNN_SOFTMAX_ACCURATE, CUDNN_SOFTMAX_MODE_CHANNEL,
       &alpha, y.dataTensor->get(), (float*)y.d_data->get(), dy.dataTensor->get(), (float*)dy.d_data->get(),
       &beta, dx.dataTensor->get(), (float*)dx.d_data->get()));
-    return dx;
+    return dx;*/
   }
 
-  Tensor<float> loss(const Tensor<float> &x, const Tensor<float> &y_real) const {
-    assert(x.shape == y_real.shape);
-
-    float posi = 1.0f / x.shape[0], nega = -1.0f / x.shape[0], batch = 1.0f / x.shape[0];
-    size_t len = x.count();
-
-    // Tensor<float> loss = y_real;
-    // assert(CUDNN_STATUS_SUCCESS == cudnnAddTensor(cudnnHandle,
-    //   &posi, this->dataTensor->get(), (float*)this->d_data->get(), &nega, loss.dataTensor->get(), (float*)loss.d_data->get()));
-
-    Tensor<float> loss(x.shape, 0.0f);
-    cublasSaxpy(cublasHandle, len, &posi, (float*)x.d_data->get(), 1, (float*)loss.d_data->get(), 1);
-    cublasSaxpy(cublasHandle, len, &nega, (float*)y_real.d_data->get(), 1, (float*)loss.d_data->get(), 1);
-    return loss;
-  }
-
-  void learn(const vector<Tensor<float> > &tensors, float lr) {
+  void learn(float lr) const {
   }
 };
 
 
-class Activation {
+class Activation: public Layer {
   cudnnActivationDescriptor_t activationDesc;
 
 public:
@@ -369,26 +369,29 @@ public:
     assert(CUDNN_STATUS_SUCCESS == cudnnDestroyActivationDescriptor(activationDesc));
   }
 
-  Tensor<float> forward(const Tensor<float> &x) const {
+  Tensor<float> forward(const Tensor<float> &x) {
     Tensor<float> ans(x.shape);
     float alpha = 1.0f, beta = 0.0f;
     assert(CUDNN_STATUS_SUCCESS == cudnnActivationForward(cudnnHandle, activationDesc, &alpha, x.dataTensor->get(), (float*)x.d_data->get(), &beta, ans.dataTensor->get(), (float*)ans.d_data->get()));
     return move(ans);
   }
 
-  Tensor<float> backward(const Tensor<float> &dy, const Tensor<float> &y, const Tensor<float> &x, bool lastLayer = false) const {
-    Tensor<float> dx = dy;
+  Tensor<float> backward(const Tensor<float> &dy, const Tensor<float> &y, const Tensor<float> &x, bool lastLayer = false) {
     if (lastLayer)
-      return dx;
+      return dy;
+    Tensor<float> dx = dy;
     float alpha = 1.0f, beta = 0.0f;
     assert(CUDNN_STATUS_SUCCESS == cudnnActivationBackward(cudnnHandle, activationDesc, &alpha, y.dataTensor->get(), (float*)y.d_data->get(),
         dy.dataTensor->get(), (float*)dy.d_data->get(), x.dataTensor->get(), (float*)x.d_data->get(), &beta, dx.dataTensor->get(), (float*)dx.d_data->get()));
     return move(dx);
   }
+
+  void learn(float lr) const {
+  }
 };
 
 
-class LRN {
+class LRN: public Layer {
   unsigned lrnN;
   float bias, lrnAlpha, lrnBeta;
   cudnnLRNDescriptor_t lrnDesc;
@@ -405,7 +408,7 @@ public:
     assert(CUDNN_STATUS_SUCCESS == cudnnDestroyLRNDescriptor(lrnDesc));
   }
 
-  Tensor<float> forward(const Tensor<float> &x) const {
+  Tensor<float> forward(const Tensor<float> &x) {
     assert(x.shape.size() == 4);
 
     Tensor<float> y(x.shape);
@@ -415,7 +418,7 @@ public:
     return move(y);
   }
 
-  Tensor<float> backward(const Tensor<float> &dy, const Tensor<float> &y, const Tensor<float> &x, bool lastLayer = false) const {
+  Tensor<float> backward(const Tensor<float> &dy, const Tensor<float> &y, const Tensor<float> &x, bool lastLayer = false) {
     Tensor<float> dx(x.shape);
     if (lastLayer)
       return dx;
@@ -425,10 +428,13 @@ public:
         x.dataTensor->get(), (float*)x.d_data->get(), &beta, dx.dataTensor->get(), (float*)dx.d_data->get()));
     return move(dx);
   }
+
+  void learn(float lr) const {
+  }
 };
 
 
-class Pooling {
+class Pooling: public Layer {
   int size, stride;
   cudnnPoolingDescriptor_t poolDesc;
 
@@ -442,29 +448,32 @@ public:
     assert(CUDNN_STATUS_SUCCESS == cudnnDestroyPoolingDescriptor(poolDesc));
   }
 
-  Tensor<float> forward(const Tensor<float> &x) const {
+  Tensor<float> forward(const Tensor<float> &x) {
     assert(x.shape.size() == 4);
     // assert((x.shape[2] - (size - stride)) % stride == 0 && (x.shape[3] - (size - stride)) % stride == 0);
 
-    Tensor<float> ans({x.shape[0], x.shape[1], (x.shape[2] - (size - stride)) / stride, (x.shape[3] - (size - stride)) / stride});
+    Tensor<float> y({x.shape[0], x.shape[1], (x.shape[2] - (size - stride)) / stride, (x.shape[3] - (size - stride)) / stride});
     float alpha = 1.0f, beta = 0.0f;
-    assert(CUDNN_STATUS_SUCCESS == cudnnPoolingForward(cudnnHandle, poolDesc, &alpha, x.dataTensor->get(), (float*)x.d_data->get(), &beta, ans.dataTensor->get(), (float*)ans.d_data->get()));
-    return move(ans);
+    assert(CUDNN_STATUS_SUCCESS == cudnnPoolingForward(cudnnHandle, poolDesc, &alpha, x.dataTensor->get(), (float*)x.d_data->get(), &beta, y.dataTensor->get(), (float*)y.d_data->get()));
+    return move(y);
   }
 
-  Tensor<float> backward(const Tensor<float> &dy, const Tensor<float> &y, const Tensor<float> &x, bool lastLayer = false) const {
-    Tensor<float> dx(x.shape);
+  Tensor<float> backward(const Tensor<float> &dy, const Tensor<float> &y, const Tensor<float> &x, bool lastLayer = false) {
     if (lastLayer)
-      return dx;
+      return dy;
+    Tensor<float> dx(x.shape);
     float alpha = 1.0f, beta = 0.0f;
     assert(CUDNN_STATUS_SUCCESS == cudnnPoolingBackward(cudnnHandle, poolDesc, &alpha, y.dataTensor->get(), (float*)y.d_data->get(), dy.dataTensor->get(), (float*)dy.d_data->get(),
                          x.dataTensor->get(), (float*)x.d_data->get(), &beta, dx.dataTensor->get(), (float*)dx.d_data->get()));
     return move(dx);
   }
+
+  void learn(float lr) const {
+  }
 };
 
 
-class Dropout {
+class Dropout: public Layer {
   cudnnDropoutDescriptor_t dropDesc;
 
   shared_ptr<DeviceMemory> states, reversed;
@@ -513,22 +522,27 @@ public:
       dx.dataTensor->get(), (float*)dx.d_data->get(), reversed->get(), reversed_size));
     return move(dx);
   }
+
+  void learn(float lr) const {
+  }
 };
 
 
-class Dense {
+class Dense: public Layer {
   Tensor<float> w, bias, ones, g_bias, g_w;
   int channels;
+  const char *kernel_init;
 
 public:
-  Dense(int channels, int max_batch = 1024): channels(channels), bias({1, channels}, true), ones({max_batch, 1}, 1.0f), w({1, 1}), g_bias({1, 1}), g_w({1, 1}) {
+  Dense(int channels, const char *kernel_init = NULL, int max_batch = 1024): channels(channels), kernel_init(kernel_init), ones({max_batch, 1}, 1.0f), bias({1, channels}, 0.0f), g_bias({1, channels}), w(), g_w() {
   }
 
   Tensor<float> forward(const Tensor<float> &x) {
-    if (w.count() <= 1) {
-      w = Tensor<float>({channels, x.shape[1]}, true);
-      g_w = Tensor<float>(w.shape);
-      g_bias = Tensor<float>(bias.shape);
+    if (w.count() < 1) {
+      if (!kernel_init)
+        w = Tensor<float>({channels, x.shape[1]}, true);
+      else
+        w = Tensor<float>({channels, x.shape[1]}, (float)atof(kernel_init));
     }
 
     auto out = x.matmul(w, false, true);
@@ -555,7 +569,7 @@ public:
     return dy.matmul(w);
   }
 
-  void learn(float lr = -0.01) const {
+  void learn(float lr) const {
     assert(w.shape == g_w.shape);
     assert(CUBLAS_STATUS_SUCCESS == cublasSaxpy(cublasHandle, w.count(), &lr, (float*)g_w.d_data->get(), 1, (float*)w.d_data->get(), 1));
 
@@ -565,7 +579,7 @@ public:
 };
 
 
-class Flatten {
+class Flatten: public Layer {
 
 public:
   Flatten() {
@@ -578,11 +592,14 @@ public:
   Tensor<float> backward(const Tensor<float> &dy, const Tensor<float> &y, const Tensor<float> &x, bool lastLayer = false) {
     return dy.reshape(x.shape);
   }
+
+  void learn(float lr) const {
+  }
 };
 
 
-class Convolution {
-  int filters, in_chans, kernel_size;
+class Convolution: public Layer {
+  int filters, kernel_size;
   Tensor<float> w_krnl, w_bias, g_krnl, g_bias;
   bool use_bias;
 
@@ -590,16 +607,15 @@ class Convolution {
   cudnnFilterDescriptor_t filterDesc;
 
 public:
-  Convolution(int filters, int kernel_size, bool use_bias = false): w_krnl({1, 1}), w_bias({1, 1}), g_krnl({1, 1}), g_bias({1, 1}),
-      filters(filters), kernel_size(kernel_size), in_chans(-1), convDesc(NULL), filterDesc(NULL), use_bias(use_bias) {
+  Convolution(int filters, int kernel_size, bool use_bias = false): w_krnl(), w_bias(), g_krnl(), g_bias(),
+      filters(filters), kernel_size(kernel_size), convDesc(NULL), filterDesc(NULL), use_bias(use_bias) {
   }
 
   void configure(int in_chans) {
-    this->in_chans = in_chans;
     w_krnl = Tensor<float>({in_chans * filters * kernel_size * kernel_size}, true);
     g_krnl = Tensor<float>(w_krnl.shape);
     if (use_bias) {
-      w_bias = Tensor<float>({1, filters, 1, 1}, true);
+      w_bias = Tensor<float>({1, filters, 1, 1}, 0.0f);
       g_bias = Tensor<float>(w_bias.shape);
     }
 
@@ -620,9 +636,9 @@ public:
   }
 
   Tensor<float> forward(const Tensor<float> &x) {
-    if (in_chans < 0)
+    if (w_krnl.count() < 1)
       configure(x.shape[1]);
-    assert(x.shape.size() == 4 && x.shape[1] == in_chans);
+    assert(x.shape.size() == 4);
 
     float alpha = 1.0f, beta = 0.0f;
     int n = x.shape[0], c = filters, h = x.shape[2] - (kernel_size - 1), w = x.shape[3] - (kernel_size - 1);
@@ -648,7 +664,7 @@ public:
     return move(ans);
   }
 
-  Tensor<float> backward(const Tensor<float> &dy, const Tensor<float> &y, const Tensor<float> &x, bool lastLayer = false) const {
+  Tensor<float> backward(const Tensor<float> &dy, const Tensor<float> &y, const Tensor<float> &x, bool lastLayer = false) {
     float alpha = 1.0f, beta = 0.0f;
     assert(y.shape[1] == filters);
     int n = x.shape[0], c = x.shape[1], h = x.shape[2], w = x.shape[3];
@@ -699,7 +715,7 @@ public:
     return move(dx);
   }
 
-  void learn(float lr = -0.05) const {
+  void learn(float lr) const {
     assert(w_krnl.shape == g_krnl.shape);
     assert(CUBLAS_STATUS_SUCCESS == cublasSaxpy(cublasHandle, w_krnl.count(), &lr, (float*)g_krnl.d_data->get(), 1, (float*)w_krnl.d_data->get(), 1));
 
@@ -783,31 +799,69 @@ static pair<vector<int>, vector<float>> ReadNormalDataset(const char* dataset) {
 }
 
 
-int main() {
-  Tensor<float>::init();
+vector<shared_ptr<Layer>> create_model() {
+  vector<shared_ptr<Layer>> layers;
+  /* CIFAR10_ALEXNET
+  layers.push_back(make_shared<Convolution>(64, 5, true));
+  layers.push_back(make_shared<Activation>(CUDNN_ACTIVATION_RELU));
+  layers.push_back(make_shared<Pooling>(3, 2, CUDNN_POOLING_MAX));
+  layers.push_back(make_shared<LRN>(4, 1.0, 0.001 / 9.0, 0.75));
+  layers.push_back(make_shared<Convolution>(64, 5, true));
+  layers.push_back(make_shared<Activation>(CUDNN_ACTIVATION_RELU));
+  layers.push_back(make_shared<LRN>(4, 1.0, 0.001 / 9.0, 0.75));
+  layers.push_back(make_shared<Pooling>(3, 2, CUDNN_POOLING_MAX));
+  layers.push_back(make_shared<Flatten>());
+  layers.push_back(make_shared<Dense>(384));
+  layers.push_back(make_shared<Activation>(CUDNN_ACTIVATION_RELU));
+  layers.push_back(make_shared<Dense>(192));
+  layers.push_back(make_shared<Activation>(CUDNN_ACTIVATION_RELU));
+  layers.push_back(make_shared<Dense>(10));
+  layers.push_back(make_shared<Softmax>());
+  */
 
-  Softmax softmax;
-  Flatten flatten;
-  Activation relu(CUDNN_ACTIVATION_RELU);
-  Pooling pooling(2, 2, CUDNN_POOLING_MAX);
-  Dropout drop1, drop2;
+  /* CIFAR10_LENET
+  layers.push_back(make_shared<Convolution>(32, 5, true));
+  layers.push_back(make_shared<Pooling>(2, 2, CUDNN_POOLING_MAX));
+  layers.push_back(make_shared<Convolution>(64, 5, true));
+  layers.push_back(make_shared<Pooling>(2, 2, CUDNN_POOLING_MAX));
+  layers.push_back(make_shared<Flatten>());
+  layers.push_back(make_shared<Dense>(512));
+  layers.push_back(make_shared<Activation>(CUDNN_ACTIVATION_RELU));
+  layers.push_back(make_shared<Dense>(10));
+  layers.push_back(make_shared<Softmax>());
+  */
 
-  // MNIST_MLP
-  Dense mnist_fc1(512), mnist_fc2(512), mnist_fc3(10);
+  /* MNIST_MLP
+  layers.push_back(make_shared<Flatten>());
+  layers.push_back(make_shared<Dense>(512));
+  layers.push_back(make_shared<Activation>(CUDNN_ACTIVATION_RELU));
+  layers.push_back(make_shared<Dropout>(0.1));
+  layers.push_back(make_shared<Dense>(512));
+  layers.push_back(make_shared<Activation>(CUDNN_ACTIVATION_RELU));
+  layers.push_back(make_shared<Dropout>(0.1));
+  layers.push_back(make_shared<Dense>(10));
+  layers.push_back(make_shared<Softmax>());
+  */
 
   // MNIST_CNN
-  Dense mnist_dense1(128), mnist_dense2(10);
-  Convolution mnist_cnn1(32, 3), mnist_cnn2(64, 3);
+  layers.push_back(make_shared<Convolution>(32, 3));
+  layers.push_back(make_shared<Activation>(CUDNN_ACTIVATION_RELU));
+  layers.push_back(make_shared<Convolution>(64, 3));
+  layers.push_back(make_shared<Activation>(CUDNN_ACTIVATION_RELU));
+  layers.push_back(make_shared<Pooling>(2, 2, CUDNN_POOLING_MAX));
+  layers.push_back(make_shared<Dropout>(0.25));
+  layers.push_back(make_shared<Flatten>());
+  layers.push_back(make_shared<Dense>(128));
+  layers.push_back(make_shared<Activation>(CUDNN_ACTIVATION_RELU));
+  layers.push_back(make_shared<Dropout>(0.5));
+  layers.push_back(make_shared<Dense>(10));
+  layers.push_back(make_shared<Softmax>());
 
-  // CIFAR10_LENET
-  Dense lenet_dense1(512), lenet_dense2(10);
-  Convolution lenet_cnn1(32, 5, true), lenet_cnn2(64, 5, true);
+  return move(layers);
+}
 
-  // CIFAR10_ALEXNET
-  Pooling alex_pooling(3, 2, CUDNN_POOLING_MAX);
-  LRN alex_lrn(4, 1.0, 0.001 / 9.0, 0.75);
-  Dense alex_fc1(384), alex_fc2(192), alex_fc3(10);
-  Convolution alex_cnn1(64, 5, true), alex_cnn2(64, 5, true);
+int main() {
+  Tensor<float>::init();
 
   auto full_images = ReadNormalDataset(TRAIN_IMAGES);
   auto full_labels = ReadNormalDataset(TRAIN_LABELS);
@@ -818,7 +872,10 @@ int main() {
   int classes = full_labels.first[1];
   printf("Total %d samples (%d, %d, %d) for %d classes found.\n", samples, full_images.first[1], full_images.first[2], full_images.first[3], classes);
 
-  int batch_size = 128, epochs = 100, steps = (samples + batch_size - 1) / batch_size * epochs;
+  auto model = create_model();
+
+  vector<Tensor<float>> input(model.size() + 1), dloss(model.size() + 1);
+  int batch_size = 128, epochs = 50, steps = (samples + batch_size - 1) / batch_size * epochs;
   for (int k = 0, it = 0; k < steps; ++k) {
     vector<float> in(width * batch_size), out(classes * batch_size);
     for (int i = 0; i < batch_size; ++i, it = (it + 1) % samples) {
@@ -831,144 +888,15 @@ int main() {
 
     float lr = - float(0.05f * pow((1.0f + 0.0001f * k), -0.75f));
 
+    input[0] = images;
+    for (int i = 0; i < model.size(); ++i)
+      input[i + 1] = model[i]->forward(input[i]);
+    auto data_output = input.back();
 
-    auto y0 = images;
-    auto y1 = mnist_cnn1.forward(y0);
-    auto y2 = relu.forward(y1);
-    auto y3 = mnist_cnn2.forward(y2);
-    auto y4 = relu.forward(y3);
-    auto y5 = pooling.forward(y4);
-    auto y6 = flatten.forward(y5);
-    auto y7 = mnist_dense1.forward(y6);
-    auto y8 = relu.forward(y7);
-    auto y9 = mnist_dense2.forward(y8);
-    auto y10 = softmax.forward(y9);
-
-    auto dy9 = softmax.loss(y10, labels);
-    auto dy8 = mnist_dense2.backward(dy9, y9, y8); mnist_dense2.learn(lr);
-    auto dy7 = relu.backward(dy8, y8, y7);
-    auto dy6 = mnist_dense1.backward(dy7, y7, y6); mnist_dense1.learn(lr);
-    auto dy5 = flatten.backward(dy6, y6, y5);
-    auto dy4 = pooling.backward(dy5, y5, y4);
-    auto dy3 = relu.backward(dy4, y4, y3);
-    auto dy2 = mnist_cnn2.backward(dy3, y3, y2); mnist_cnn2.learn(lr);
-    auto dy1 = relu.backward(dy2, y2, y1);
-    auto dy0 = mnist_cnn1.backward(dy1, y1, y0, true); mnist_cnn1.learn(lr);
-
-    auto data_output = y9, data_loss = y10;
-
-    /* << CIFAR10_ALEXNET >>
-    auto y0 = images;
-    auto y1 = alex_cnn1     .forward(y0); // 64x28x28
-    auto y2 = relu          .forward(y1); // 64x28x28
-    auto y3 = alex_pooling  .forward(y2); // 64x13x13
-    auto y4 = alex_lrn      .forward(y3); // 64x13x13
-    auto y5 = alex_cnn2     .forward(y4); // 64x9x9
-    auto y6 = relu          .forward(y5); // 64x28x28
-    auto y7 = alex_lrn      .forward(y6); // 64x9x9
-    auto y8 = alex_pooling  .forward(y7); // 64x4x4
-    auto y9 = flatten       .forward(y8); // 1024
-    auto y10 = alex_fc1     .forward(y9); // 384
-    auto y11 = relu         .forward(y10); // 64x28x28
-    auto y12 = alex_fc2     .forward(y11); // 192
-    auto y13 = relu         .forward(y12); // 64x28x28
-    auto y14 = alex_fc3     .forward(y13); // 10
-    auto y15 = softmax      .forward(y14); // 10
-
-    auto dy14 = softmax.loss(y15, labels);
-    auto dy13pack = alex_fc3.backward(dy14, y14, y13); alex_fc3.learn(dy13pack, lr); auto dy13 = dy13pack.back();
-    auto dy12 = relu.backward(dy13, y13, y12);
-    auto dy11pack = alex_fc2.backward(dy12, y12, y11); alex_fc2.learn(dy11pack, lr); auto dy11 = dy11pack.back();
-    auto dy10 = relu.backward(dy11, y11, y10);
-    auto dy9pack = alex_fc1.backward(dy10, y10, y9); alex_fc1.learn(dy9pack, lr); auto dy9 = dy9pack.back();
-    auto dy8 = flatten.backward(dy9, y9, y8);
-    auto dy7 = alex_pooling.backward(dy8, y8, y7);
-    auto dy6 = alex_lrn.backward(dy7, y7, y6);
-    auto dy5 = relu.backward(dy6, y6, y5);
-    auto dy4pack = alex_cnn2.backward(dy5, y5, y4); alex_cnn2.learn(dy4pack, lr); auto dy4 = dy4pack.back();
-    auto dy3 = alex_lrn.backward(dy4, y4, y3);
-    auto dy2 = alex_pooling.backward(dy3, y3, y2);
-    auto dy1 = relu.backward(dy2, y2, y1);
-    auto dy0pack = alex_cnn1.backward(dy1, y1, y0, true); alex_cnn1.learn(dy0pack, lr); // auto dy0 = dy0pack.back();
-
-    auto data_output = y14, data_loss = y15;
-    */
-
-
-    /* << MNIST_LENET >>
-    auto y0 = images;
-    auto y1 = lenet_cnn1.forward(y0);
-    auto y2 = pooling.forward(y1);
-    auto y3 = lenet_cnn2.forward(y2);
-    auto y4 = pooling.forward(y3);
-    auto y5 = flatten.forward(y4);
-    auto y6 = lenet_dense1.forward(y5);
-    auto y7 = relu.forward(y6);
-    auto y8 = lenet_dense2.forward(y7);
-    auto y9 = softmax.forward(y8);
-
-    auto dy8 = softmax.loss(y9, labels);
-    auto dy7pack = lenet_dense2.backward(dy8, y8, y7); lenet_dense2.learn(dy7pack, lr); auto dy7 = dy7pack.back();
-    auto dy6 = relu.backward(dy7, y7, y6);
-    auto dy5pack = lenet_dense1.backward(dy6, y6, y5); lenet_dense1.learn(dy5pack, lr); auto dy5 = dy5pack.back();
-    auto dy4 = flatten.backward(dy5, y5, y4);
-    auto dy3 = pooling.backward(dy4, y4, y3);
-    auto dy2pack = lenet_cnn2.backward(dy3, y3, y2); lenet_cnn2.learn(dy2pack, lr); auto dy2 = dy2pack.back();
-    auto dy1 = pooling.backward(dy2, y2, y1);
-    auto dy0pack = lenet_cnn1.backward(dy1, y1, y0, true); lenet_cnn1.learn(dy0pack, lr); // auto dy0 = dy0pack.back();
-
-    auto data_output = y8, data_loss = y9;
-    */
-
-    /* << MNIST_CNN >>
-    auto y0 = images;
-    auto y1 = mnist_cnn1.forward(y0);
-    auto y2 = relu.forward(y1);
-    auto y3 = mnist_cnn2.forward(y2);
-    auto y4 = relu.forward(y3);
-    auto y5 = pooling.forward(y4);
-    auto y6 = flatten.forward(y5);
-    auto y7 = mnist_dense1.forward(y6);
-    auto y8 = relu.forward(y7);
-    auto y9 = mnist_dense2.forward(y8);
-    auto y10 = softmax.forward(y9);
-
-    auto dy9 = softmax.loss(y10, labels);
-    auto dy8 = mnist_dense2.backward(dy9, y9, y8); mnist_dense2.learn(lr);
-    auto dy7 = relu.backward(dy8, y8, y7);
-    auto dy6 = mnist_dense1.backward(dy7, y7, y6); mnist_dense1.learn(lr);
-    auto dy5 = flatten.backward(dy6, y6, y5);
-    auto dy4 = pooling.backward(dy5, y5, y4);
-    auto dy3 = relu.backward(dy4, y4, y3);
-    auto dy2 = mnist_cnn2.backward(dy3, y3, y2); mnist_cnn2.learn(lr);
-    auto dy1 = relu.backward(dy2, y2, y1);
-    auto dy0 = mnist_cnn1.backward(dy1, y1, y0, true); mnist_cnn1.learn(lr);
-
-    auto data_output = y9, data_loss = y10;
-    */
-
-    /* << MNIST_MLP >>
-    auto y0 = flatten.forward(images);
-    auto y1 = mnist_fc1.forward(y0);
-    auto y2 = relu.forward(y1);
-    auto y2mid = drop1.forward(y2);
-    auto y3 = mnist_fc2.forward(y2mid);
-    auto y4 = relu.forward(y3);
-    auto y4mid = drop2.forward(y2);
-    auto y5 = mnist_fc3.forward(y4);
-    auto y6 = softmax.forward(y5);
-
-    auto dy5 = softmax.loss(y6, labels);
-    auto dy4mid = mnist_fc3.backward(dy5, y4, y4); mnist_fc3.learn(lr);
-    auto dy4 = drop2.backward(dy4mid, y4mid, y3);
-    auto dy3 = relu.backward(dy4, y4, y3);
-    auto dy2mid = mnist_fc2.backward(dy3, y3, y2); mnist_fc2.learn(lr);
-    auto dy2 = drop1.backward(dy2mid, y2mid, y2);
-    auto dy1 = relu.backward(dy2, y2, y1);
-    auto dy0 = mnist_fc1.backward(dy1, y1, y0, true); mnist_fc1.learn(lr);
-
-    auto data_output = y5, data_loss = y6;
-    */
+    dloss[model.size()] = model.back()->backward(input.back(), labels, input.back());
+    for (int i = model.size() - 1; i >= 1; --i)
+      dloss[i] = model[i - 1]->backward(dloss[i + 1], input[i], input[i - 1], i == 1), model[i - 1]->learn(lr);
+    auto data_loss = dloss.back();
 
     if (it < batch_size) {
       int tot = 0, acc = 0;
