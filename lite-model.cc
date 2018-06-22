@@ -795,7 +795,10 @@ static pair<vector<int>, vector<float>> ReadNormalDataset(const char* dataset) {
 
   const int UBYTE_MAGIC = 0x800;
   FILE *fp;
-  assert((fp = fopen(dataset, "rb")) != NULL);
+  if ((fp = fopen(dataset, "rb")) == NULL) {
+    fprintf(stderr, "Cannot open file: %s\n", dataset);
+    exit(1);
+  }
 
   uint32_t header, length;
   header = read_uint32(fp);
@@ -910,8 +913,8 @@ vector<shared_ptr<Layer>> create_model(const char *model) {
     layers.push_back(make_shared<Dense>(10));
     layers.push_back(make_shared<Softmax>());
   } else {
-    printf("No model of name %s found.\n", model);
-    exit(0);
+    fprintf(stderr, "No model of name %s found.\n", model);
+    exit(1);
   }
   return move(layers);
 }
@@ -1001,4 +1004,3 @@ int main(int argc, char **argv) {
   }
   return 0;
 }
-
