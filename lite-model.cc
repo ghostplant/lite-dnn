@@ -27,6 +27,7 @@
 #include <cudnn_v7.h>
 
 #include <tensor.h>
+#include <model.h>
 #include <layers.h>
 #include <dataset.h>
 
@@ -148,7 +149,7 @@ int main(int argc, char **argv) {
       memcpy(&in[i * width], &full_images.second[it * width], width * sizeof(float));
       memcpy(&out[i * classes], &full_labels.second[it * classes], classes * sizeof(float));
     }
-    Tensor<float> images({batch_size, full_images.first[1], full_images.first[2], full_images.first[3]}, in), labels({batch_size, classes}, out);
+    Tensor<float> images({batch_size, full_images.first[1], full_images.first[2], full_images.first[3]}, in.data()), labels({batch_size, classes}, out.data());
 
     float lr = - float(0.05f * pow((1.0f + 0.0001f * k), -0.75f));
 
@@ -163,33 +164,9 @@ int main(int argc, char **argv) {
     auto data_loss = dloss.back();
 
     if (it < batch_size) {
-      int tot = 0, acc = 0;
-      vector<float> pred_data = data_output.get_data();
-      for (int i = 0; i < batch_size; ++i) {
-        int it = 0, jt = 0;
-        for (int j = 1; j < classes; ++j) {
-          if (pred_data[i * classes + it] < pred_data[i * classes + j])
-            it = j;
-          if (out[i * classes + jt] < out[i * classes + j])
-            jt = j;
-        }
-        ++tot;
-        if (it == jt)
-          ++acc;
-      }
-
-      vector<float> loss_data = data_loss.get_data();
-      float loss = 0.0f;
-      for (int i = 0; i < loss_data.size(); ++i) {
-        float j = fabs(loss_data[i]);
-        if (j >= 1e-8)
-          loss += -j * log(j);
-      }
-      loss /= data_loss.shape[0];
-
       static int epoch = 0;
       unsigned long currClock = get_microseconds();
-      printf("epoch = %d: loss = %.4f, acc = %.2f%%, time = %.4fs\n", ++epoch, loss, acc * 100.0f / tot, (currClock - lastClock) * 1e-6f);
+      printf("epoch = %d: loss = %.4f, acc = %.2f%%, time = %.4fs\n", ++epoch, get_loss(data_loss), get_accuracy(data_output, labels), (currClock - lastClock) * 1e-6f);
       lastClock = currClock;
     }
   }
