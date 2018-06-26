@@ -119,13 +119,12 @@ public:
       return move(r);
     };
 
-    set_data(random_uniform());
+    set_data(random_uniform().data());
   }
 
-  Tensor(const vector<int> &shape, const vector<T> &host) {
+  Tensor(const vector<int> &shape, const T *host) {
     size_t len = setup_tensor(shape);
 
-    assert(host.size() == len);
     set_data(host);
   }
 
@@ -153,10 +152,9 @@ public:
     return len;
   }
 
-  void set_data(const vector<T> &host) const {
+  void set_data(const T *host) const {
     size_t len = count();
-    assert(len == host.size());
-    assert(CUDA_SUCCESS == cuMemcpyHtoDAsync_v2((CUdeviceptr)d_data->get(), host.data(), len * sizeof(T), hStream));
+    assert(CUDA_SUCCESS == cuMemcpyHtoDAsync_v2((CUdeviceptr)d_data->get(), host, len * sizeof(T), hStream));
     assert(CUDA_SUCCESS == cuStreamSynchronize(hStream));
   }
 
