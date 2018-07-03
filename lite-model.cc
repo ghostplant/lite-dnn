@@ -95,6 +95,51 @@ vector<shared_ptr<Layer>> create_model(const char *model) {
     layers.push_back(make_shared<Activation>(CUDNN_ACTIVATION_RELU));
     layers.push_back(make_shared<Dense>(10));
     layers.push_back(make_shared<Softmax>());
+  } else if (!strcmp(model, "cifar10_vgg16")) {
+    // Block-1
+    layers.push_back(make_shared<Convolution>(64, 3, 1, 1));
+    layers.push_back(make_shared<Activation>(CUDNN_ACTIVATION_RELU));
+    layers.push_back(make_shared<Convolution>(64, 3, 1, 1));
+    layers.push_back(make_shared<Activation>(CUDNN_ACTIVATION_RELU));
+    layers.push_back(make_shared<Pooling>(2, 2, CUDNN_POOLING_MAX));
+    // Block-2
+    layers.push_back(make_shared<Convolution>(128, 3, 1, 1));
+    layers.push_back(make_shared<Activation>(CUDNN_ACTIVATION_RELU));
+    layers.push_back(make_shared<Convolution>(128, 3, 1, 1));
+    layers.push_back(make_shared<Activation>(CUDNN_ACTIVATION_RELU));
+    layers.push_back(make_shared<Pooling>(2, 2, CUDNN_POOLING_MAX));
+    // Block-3
+    /*layers.push_back(make_shared<Convolution>(256, 3, 1, 1));
+    layers.push_back(make_shared<Activation>(CUDNN_ACTIVATION_RELU));
+    layers.push_back(make_shared<Convolution>(256, 3, 1, 1));
+    layers.push_back(make_shared<Activation>(CUDNN_ACTIVATION_RELU));
+    layers.push_back(make_shared<Convolution>(256, 3, 1, 1));
+    layers.push_back(make_shared<Activation>(CUDNN_ACTIVATION_RELU));
+    layers.push_back(make_shared<Pooling>(2, 2, CUDNN_POOLING_MAX));
+    // Block-4
+    layers.push_back(make_shared<Convolution>(512, 3, 1, 1));
+    layers.push_back(make_shared<Activation>(CUDNN_ACTIVATION_RELU));
+    layers.push_back(make_shared<Convolution>(512, 3, 1, 1));
+    layers.push_back(make_shared<Activation>(CUDNN_ACTIVATION_RELU));
+    layers.push_back(make_shared<Convolution>(512, 3, 1, 1));
+    layers.push_back(make_shared<Activation>(CUDNN_ACTIVATION_RELU));
+    layers.push_back(make_shared<Pooling>(2, 2, CUDNN_POOLING_MAX));
+    // Block-5
+    layers.push_back(make_shared<Convolution>(512, 3, 1, 1));
+    layers.push_back(make_shared<Activation>(CUDNN_ACTIVATION_RELU));
+    layers.push_back(make_shared<Convolution>(512, 3, 1, 1));
+    layers.push_back(make_shared<Activation>(CUDNN_ACTIVATION_RELU));
+    layers.push_back(make_shared<Convolution>(512, 3, 1, 1));
+    layers.push_back(make_shared<Activation>(CUDNN_ACTIVATION_RELU));
+    layers.push_back(make_shared<Pooling>(2, 2, CUDNN_POOLING_MAX));*/
+    // Include top
+    layers.push_back(make_shared<Flatten>());
+    layers.push_back(make_shared<Dense>(4096));
+    layers.push_back(make_shared<Activation>(CUDNN_ACTIVATION_RELU));
+    layers.push_back(make_shared<Dense>(4096));
+    layers.push_back(make_shared<Activation>(CUDNN_ACTIVATION_RELU));
+    layers.push_back(make_shared<Dense>(10));
+    layers.push_back(make_shared<Softmax>());
   } else {
     fprintf(stderr, "No model of name %s found.\n", model);
     exit(1);
@@ -107,9 +152,6 @@ static inline unsigned long get_microseconds() {
   gettimeofday(&tv, NULL);
   return tv.tv_sec * 1000000LU + tv.tv_usec;
 }
-
-static unsigned long lastClock = get_microseconds();
-
 
 int main(int argc, char **argv) {
   Tensor<float>::init();
@@ -127,7 +169,7 @@ int main(int argc, char **argv) {
   auto model = create_model(name);
 
   vector<Tensor<float>> input(model.size() + 1), dloss(model.size());
-  int batch_size = 128, epochs = 50, steps = (samples + batch_size - 1) / batch_size * epochs;
+  int batch_size = 128, epochs = 50, steps_per_epoch = (samples + batch_size - 1) / batch_size, steps = steps_per_epoch * epochs;
 
   vector<int> shape = full_images.first;
   shape[0] = batch_size;
@@ -140,6 +182,8 @@ int main(int argc, char **argv) {
     puts(")");
   }
   puts("");
+
+  static unsigned long lastClock = get_microseconds();
 
   for (int k = 0, it = 0; k < steps; ++k) {
     vector<float> in(width * batch_size), out(classes * batch_size);
@@ -163,10 +207,9 @@ int main(int argc, char **argv) {
       dloss[i] = model[i]->backward(dloss[i + 1], input[i + 1], input[i], i == 0), model[i]->learn(lr);
     auto data_loss = dloss.back();
 
-    if (it < batch_size) {
-      static int epoch = 0;
-      unsigned long currClock = get_microseconds();
-      printf("epoch = %d: loss = %.4f, acc = %.2f%%, time = %.4fs\n", ++epoch, get_loss(data_loss), get_accuracy(data_output, labels), (currClock - lastClock) * 1e-6f);
+    unsigned long currClock = get_microseconds();
+    if (currClock > lastClock + 1000000) {
+      printf("step = %d (epoch = %d): loss = %.4f, acc = %.2f%%, time = %.4fs\n", k, k / steps_per_epoch, get_loss(data_loss), get_accuracy(data_output, labels), (currClock - lastClock) * 1e-6f);
       lastClock = currClock;
     }
   }
