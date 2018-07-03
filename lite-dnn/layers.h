@@ -181,9 +181,8 @@ class Pooling: public Layer {
   cudnnPoolingDescriptor_t poolDesc;
 
 public:
-  Pooling(int size, int stride = -1, cudnnPoolingMode_t mode = CUDNN_POOLING_MAX): size(size), stride(stride) {
-    if (stride < 0)
-      this->stride = stride = size;
+  Pooling(int size, int stride, cudnnPoolingMode_t mode = CUDNN_POOLING_MAX): size(size), stride(stride) {
+    assert(stride > 0);
     assert(CUDNN_STATUS_SUCCESS == cudnnCreatePoolingDescriptor(&poolDesc));
     assert(CUDNN_STATUS_SUCCESS == cudnnSetPooling2dDescriptor(poolDesc, mode, CUDNN_PROPAGATE_NAN, size, size, 0, 0, stride, stride));
   }
