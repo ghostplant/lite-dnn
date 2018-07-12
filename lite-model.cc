@@ -208,7 +208,7 @@ int main(int argc, char **argv) {
     auto data_loss = dloss.back();
 
     unsigned long currClock = get_microseconds();
-    if (currClock > lastClock + 1000000) {
+    if (currClock >= lastClock + 1000000) {
       printf("step = %d (epoch = %d): loss = %.4f, acc = %.2f%%, time = %.4fs\n", k, k / steps_per_epoch, get_loss(data_loss), get_accuracy(data_output, labels), (currClock - lastClock) * 1e-6f);
       lastClock = currClock;
     }
