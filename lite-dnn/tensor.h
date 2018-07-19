@@ -21,7 +21,6 @@ public:
   DeviceMemory(size_t length): d_data(NULL), length(length) {
     if (length) {
       auto& it = cached_mem[length]; if (it.size()) { d_data = it.back(); it.pop_back(); return; }
-
       assert(CUDA_SUCCESS == cuMemAlloc_v2((CUdeviceptr*)&d_data, length));
     }
   }

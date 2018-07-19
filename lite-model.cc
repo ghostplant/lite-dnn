@@ -40,11 +40,8 @@ using namespace std;
 #define CIFAR10_IMAGES "/tmp/cifar10-images-idx4-ubyte"
 #define CIFAR10_LABELS "/tmp/cifar10-labels-idx1-ubyte"
 
-#define TRAIN_IMAGES MNIST_IMAGES
-#define TRAIN_LABELS MNIST_LABELS
 
-
-vector<shared_ptr<Layer>> create_model(const char *model) {
+vector<shared_ptr<Layer>> create_model(const char *model, int n_class) {
   vector<shared_ptr<Layer>> layers;
   if (!strcmp(model, "mnist_mlp")) {
     layers.push_back(make_shared<Flatten>());
@@ -54,7 +51,7 @@ vector<shared_ptr<Layer>> create_model(const char *model) {
     layers.push_back(make_shared<Dense>(512));
     layers.push_back(make_shared<Activation>(CUDNN_ACTIVATION_RELU));
     layers.push_back(make_shared<Dropout>(0.1));
-    layers.push_back(make_shared<Dense>(10));
+    layers.push_back(make_shared<Dense>(n_class));
     layers.push_back(make_shared<Softmax>());
   } else if (!strcmp(model, "mnist_cnn")) {
     layers.push_back(make_shared<Convolution>(32, 3));
@@ -67,7 +64,7 @@ vector<shared_ptr<Layer>> create_model(const char *model) {
     layers.push_back(make_shared<Dense>(128));
     layers.push_back(make_shared<Activation>(CUDNN_ACTIVATION_RELU));
     layers.push_back(make_shared<Dropout>(0.5));
-    layers.push_back(make_shared<Dense>(10));
+    layers.push_back(make_shared<Dense>(n_class));
     layers.push_back(make_shared<Softmax>());
   } else if (!strcmp(model, "cifar10_lenet")) {
     layers.push_back(make_shared<Convolution>(32, 5, true));
@@ -77,7 +74,7 @@ vector<shared_ptr<Layer>> create_model(const char *model) {
     layers.push_back(make_shared<Flatten>());
     layers.push_back(make_shared<Dense>(512));
     layers.push_back(make_shared<Activation>(CUDNN_ACTIVATION_RELU));
-    layers.push_back(make_shared<Dense>(10));
+    layers.push_back(make_shared<Dense>(n_class));
     layers.push_back(make_shared<Softmax>());
   } else if (!strcmp(model, "cifar10_alexnet")) {
     layers.push_back(make_shared<Convolution>(64, 5, true));
@@ -93,7 +90,7 @@ vector<shared_ptr<Layer>> create_model(const char *model) {
     layers.push_back(make_shared<Activation>(CUDNN_ACTIVATION_RELU));
     layers.push_back(make_shared<Dense>(192));
     layers.push_back(make_shared<Activation>(CUDNN_ACTIVATION_RELU));
-    layers.push_back(make_shared<Dense>(10));
+    layers.push_back(make_shared<Dense>(n_class));
     layers.push_back(make_shared<Softmax>());
   } else if (!strcmp(model, "cifar10_vgg16")) {
     // Block-1
@@ -138,7 +135,7 @@ vector<shared_ptr<Layer>> create_model(const char *model) {
     layers.push_back(make_shared<Activation>(CUDNN_ACTIVATION_RELU));
     layers.push_back(make_shared<Dense>(4096));
     layers.push_back(make_shared<Activation>(CUDNN_ACTIVATION_RELU));
-    layers.push_back(make_shared<Dense>(10));
+    layers.push_back(make_shared<Dense>(n_class));
     layers.push_back(make_shared<Softmax>());
   } else {
     fprintf(stderr, "No model of name %s found.\n", model);
@@ -153,26 +150,168 @@ static inline unsigned long get_microseconds() {
   return tv.tv_sec * 1000000LU + tv.tv_usec;
 }
 
+
+#include <dirent.h>
+#include <opencv2/core/core.hpp>
+#include <opencv2/highgui/highgui.hpp>
+#include <opencv2/imgproc/imgproc.hpp>
+#include <unordered_map>
+
+using std::unordered_map;
+
+auto image_generator(string path, int height = 229, int width = 229) {
+
+  if (path.size() > 0 && path[path.size() - 1] != '/')
+    path += '/';
+
+  struct Generator {
+    unordered_map<string, vector<string>> dict;
+    vector<string> keyset;
+    int n_class, channel, height, width;
+
+    auto next_batch(int batch_size = 32) {
+      vector<float> nchw(batch_size * channel * height * width);
+      vector<float> nl(batch_size * keyset.size());
+
+      for (int i = 0; i < batch_size; ++i) {
+        int c = rand() % dict.size();
+        auto &files = dict[keyset[c]];
+        int it = rand() % files.size();
+
+        string image_path = keyset[c] + files[it];
+        cv::Mat image = cv::imread(image_path, 1);
+        cv::Size dst_size(height, width);
+        cv::Mat dst;
+        if (image.data == nullptr) {
+          --i;
+          continue;
+        }
+        cv::resize(image, dst, dst_size);
+
+        nl[keyset.size() * i + c] = 1.0f; // one hot
+
+        uint8_t *ptr = dst.data;
+        float *b = nchw.data() + (channel * height * width) * i;
+        float *g = b + height * width, *r = g + height * width;
+        for (int h = 0; h < height; ++h) {
+          for (int w = 0; w < width; ++w) {
+            *b++ = *ptr++ / 255.0f, *g++ = *ptr++ / 255.0f, *r++ = *ptr++ / 255.0f;
+          }
+        }
+        // cv::imwrite("/var/www/html/0-resize.jpg", dst);
+      }
+
+      struct dataset {
+        Tensor<float> images, labels;
+      };
+
+      return dataset({
+        Tensor<float>({batch_size, channel, height, width}, nchw.data()),
+        Tensor<float>({batch_size, (int)keyset.size()}, nl.data())
+      });
+    }
+  } gen;
+
+  dirent *ep, *ch_ep;
+  DIR *root = opendir(path.c_str());
+  assert(root != nullptr);
+
+  while ((ep = readdir(root)) != nullptr) {
+    if (!ep->d_name[1] || (ep->d_name[1] == '.' && !ep->d_name[2]))
+      continue;
+    string sub_dir = path + ep->d_name + "/";
+    DIR *child = opendir(sub_dir.c_str());
+    if (child == nullptr)
+      continue;
+    while ((ch_ep = readdir(child)) != nullptr) {
+      if (!ch_ep->d_name[1] || (ch_ep->d_name[1] == '.' && !ch_ep->d_name[2]))
+        continue;
+      gen.dict[sub_dir].push_back(ch_ep->d_name);
+    }
+    closedir(child);
+  }
+  closedir(root);
+
+  gen.keyset.clear();
+
+  int samples = 0;
+  for (auto &it: gen.dict) {
+    gen.keyset.push_back(it.first);
+    samples += it.second.size();
+  }
+  gen.n_class = gen.keyset.size(), gen.channel = 3, gen.height = height, gen.width = width;
+
+  printf("Total %d samples found with %d classes.\n", samples, gen.n_class);
+  return gen;
+}
+
+auto array_generator(const char* images_ubyte, const char* labels_ubyte) {
+
+  struct Generator {
+    vector<float> images_data, labels_data;
+    int n_sample, n_class, channel, height, width;
+    int curr_iter;
+
+    auto next_batch(int batch_size = 32) {
+      struct dataset {
+        Tensor<float> images, labels;
+      };
+
+      int index = curr_iter;
+      if (curr_iter + batch_size <= n_sample) {
+        curr_iter += batch_size;
+
+        return dataset({
+          Tensor<float>({batch_size, channel, height, width}, images_data.data() + index * channel * height * width),
+          Tensor<float>({batch_size, n_class}, labels_data.data() + index * n_class)
+        });
+      } else {
+        curr_iter += batch_size - n_sample;
+
+        vector<float> nchw(batch_size * channel * height * width);
+        vector<float> nl(batch_size * n_class);
+
+        memcpy(nchw.data(), images_data.data() + index * channel * height * width, sizeof(float) * channel * height * width * (n_sample - index));
+        memcpy(nl.data(), labels_data.data() + index * n_class, sizeof(float) * n_class * (n_sample - index));
+
+        memcpy(nchw.data() + channel * height * width * (n_sample - index), images_data.data(), sizeof(float) * channel * height * width * curr_iter);
+        memcpy(nl.data() +  n_class * (n_sample - index), labels_data.data(), sizeof(float) * n_class * curr_iter);
+
+        return dataset({
+          Tensor<float>({batch_size, channel, height, width}, nchw.data()),
+          Tensor<float>({batch_size, n_class}, nl.data())
+        });
+      }
+    }
+  } gen;
+
+  auto full_images = ReadNormalDataset(images_ubyte);
+  auto full_labels = ReadNormalDataset(labels_ubyte);
+  assert(full_images.first[0] == full_labels.first[0]);
+
+  gen.images_data = move(full_images.second);
+  gen.labels_data = move(full_labels.second);
+
+  gen.curr_iter = 0;
+  gen.n_sample = full_labels.first[0];
+  gen.n_class = full_labels.first[1], gen.channel = full_images.first[1], gen.height = full_images.first[2], gen.width = full_images.first[3];
+
+  printf("Total %d samples found with %d classes.\n", gen.n_sample, gen.n_class);
+  return gen;
+}
+
+
 int main(int argc, char **argv) {
   Tensor<float>::init();
 
-  auto full_images = ReadNormalDataset(TRAIN_IMAGES);
-  auto full_labels = ReadNormalDataset(TRAIN_LABELS);
-  assert(full_images.first[0] == full_labels.first[0]);
+  // auto gen = image_generator("/docker/PetImages", 32, 32);
+  auto gen = array_generator(MNIST_IMAGES, MNIST_LABELS);
 
-  int samples = full_images.first[0];
-  int width = full_images.first[1] * full_images.first[2] * full_images.first[3];
-  int classes = full_labels.first[1];
 
-  const char *name = argc > 1 ? argv[1] : "mnist_cnn";
-  printf("Total %d samples (%d, %d, %d) for %d classes found, using %s.\n", samples, full_images.first[1], full_images.first[2], full_images.first[3], classes, name);
-  auto model = create_model(name);
+  int batch_size = 128, steps = 60000;
+  vector<int> shape = {batch_size, gen.channel, gen.height, gen.width};
 
-  vector<Tensor<float>> input(model.size() + 1), dloss(model.size());
-  int batch_size = 128, epochs = 50, steps_per_epoch = (samples + batch_size - 1) / batch_size, steps = steps_per_epoch * epochs;
-
-  vector<int> shape = full_images.first;
-  shape[0] = batch_size;
+  auto model = create_model(argc > 1 ? argv[1] : "mnist_cnn", gen.n_class);
   puts("");
   for (int i = 0; i < model.size(); ++i) {
     shape = model[i]->configure(shape);
@@ -183,17 +322,11 @@ int main(int argc, char **argv) {
   }
   puts("");
 
+  vector<Tensor<float>> input(model.size() + 1), dloss(model.size());
   static unsigned long lastClock = get_microseconds();
 
   for (int k = 0, it = 0; k < steps; ++k) {
-    vector<float> in(width * batch_size), out(classes * batch_size);
-    for (int i = 0; i < batch_size; ++i, it = (it + 1) % samples) {
-      assert(i * width + width <= in.size() && it * width + width <= full_images.second.size());
-      assert(i * classes + classes <= in.size() && it * classes + classes <= full_images.second.size());
-      memcpy(&in[i * width], &full_images.second[it * width], width * sizeof(float));
-      memcpy(&out[i * classes], &full_labels.second[it * classes], classes * sizeof(float));
-    }
-    Tensor<float> images({batch_size, full_images.first[1], full_images.first[2], full_images.first[3]}, in.data()), labels({batch_size, classes}, out.data());
+    auto batch = gen.next_batch(batch_size); auto &images = batch.images, &labels = batch.labels;
 
     float lr = - float(0.05f * pow((1.0f + 0.0001f * k), -0.75f));
 
@@ -209,7 +342,7 @@ int main(int argc, char **argv) {
 
     unsigned long currClock = get_microseconds();
     if (currClock >= lastClock + 1000000) {
-      printf("step = %d (epoch = %d): loss = %.4f, acc = %.2f%%, time = %.4fs\n", k, k / steps_per_epoch, get_loss(data_loss), get_accuracy(data_output, labels), (currClock - lastClock) * 1e-6f);
+      printf("step = %d: loss = %.4f, acc = %.2f%%, time = %.4fs\n", k, get_loss(data_loss), get_accuracy(data_output, labels), (currClock - lastClock) * 1e-6f);
       lastClock = currClock;
     }
   }
