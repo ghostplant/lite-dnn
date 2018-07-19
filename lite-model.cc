@@ -71,9 +71,11 @@ vector<shared_ptr<Layer>> create_model(const char *model, int n_class) {
     layers.push_back(make_shared<Pooling>(2, 2, CUDNN_POOLING_MAX));
     layers.push_back(make_shared<Convolution>(64, 5, true));
     layers.push_back(make_shared<Pooling>(2, 2, CUDNN_POOLING_MAX));
+    layers.push_back(make_shared<Dropout>(0.25));
     layers.push_back(make_shared<Flatten>());
     layers.push_back(make_shared<Dense>(512));
     layers.push_back(make_shared<Activation>(CUDNN_ACTIVATION_RELU));
+    layers.push_back(make_shared<Dropout>(0.25));
     layers.push_back(make_shared<Dense>(n_class));
     layers.push_back(make_shared<Softmax>());
   } else if (!strcmp(model, "cifar10_alexnet")) {
@@ -202,12 +204,12 @@ auto image_generator(string path, int height = 229, int width = 229) {
       }
 
       struct dataset {
-        Tensor<float> images, labels;
+        Tensor images, labels;
       };
 
       return dataset({
-        Tensor<float>({batch_size, channel, height, width}, nchw.data()),
-        Tensor<float>({batch_size, (int)keyset.size()}, nl.data())
+        Tensor({batch_size, channel, height, width}, nchw.data()),
+        Tensor({batch_size, (int)keyset.size()}, nl.data())
       });
     }
   } gen;
@@ -254,7 +256,7 @@ auto array_generator(const char* images_ubyte, const char* labels_ubyte) {
 
     auto next_batch(int batch_size = 32) {
       struct dataset {
-        Tensor<float> images, labels;
+        Tensor images, labels;
       };
 
       int index = curr_iter;
@@ -262,8 +264,8 @@ auto array_generator(const char* images_ubyte, const char* labels_ubyte) {
         curr_iter += batch_size;
 
         return dataset({
-          Tensor<float>({batch_size, channel, height, width}, images_data.data() + index * channel * height * width),
-          Tensor<float>({batch_size, n_class}, labels_data.data() + index * n_class)
+          Tensor({batch_size, channel, height, width}, images_data.data() + index * channel * height * width),
+          Tensor({batch_size, n_class}, labels_data.data() + index * n_class)
         });
       } else {
         curr_iter += batch_size - n_sample;
@@ -278,8 +280,8 @@ auto array_generator(const char* images_ubyte, const char* labels_ubyte) {
         memcpy(nl.data() +  n_class * (n_sample - index), labels_data.data(), sizeof(float) * n_class * curr_iter);
 
         return dataset({
-          Tensor<float>({batch_size, channel, height, width}, nchw.data()),
-          Tensor<float>({batch_size, n_class}, nl.data())
+          Tensor({batch_size, channel, height, width}, nchw.data()),
+          Tensor({batch_size, n_class}, nl.data())
         });
       }
     }
@@ -302,13 +304,13 @@ auto array_generator(const char* images_ubyte, const char* labels_ubyte) {
 
 
 int main(int argc, char **argv) {
-  Tensor<float>::init();
+  Tensor::init();
 
   // auto gen = image_generator("/docker/PetImages", 32, 32);
   auto gen = array_generator(MNIST_IMAGES, MNIST_LABELS);
 
 
-  int batch_size = 128, steps = 60000;
+  int batch_size = 128, steps = 600000;
   vector<int> shape = {batch_size, gen.channel, gen.height, gen.width};
 
   auto model = create_model(argc > 1 ? argv[1] : "mnist_cnn", gen.n_class);
@@ -322,7 +324,7 @@ int main(int argc, char **argv) {
   }
   puts("");
 
-  vector<Tensor<float>> input(model.size() + 1), dloss(model.size());
+  vector<Tensor> input(model.size() + 1), dloss(model.size());
   static unsigned long lastClock = get_microseconds();
 
   for (int k = 0, it = 0; k < steps; ++k) {

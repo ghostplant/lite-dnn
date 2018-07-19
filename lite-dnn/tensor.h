@@ -63,7 +63,7 @@ public:
 };
 
 
-template <class T> class Tensor {
+class Tensor {
 
 public:
   shared_ptr<DeviceMemory> d_data;
@@ -121,16 +121,16 @@ public:
     set_data(random_uniform().data());
   }
 
-  Tensor(const vector<int> &shape, const T *host) {
+  Tensor(const vector<int> &shape, const float *host) {
     size_t len = setup_tensor(shape);
 
     set_data(host);
   }
 
-  Tensor(const vector<int> &shape, const T val) {
+  Tensor(const vector<int> &shape, const float val) {
     size_t len = setup_tensor(shape);
 
-    assert(sizeof(T) == sizeof(unsigned int));
+    assert(sizeof(float) == sizeof(unsigned int));
     unsigned int ui = (unsigned int&)val;
     assert(CUDA_SUCCESS == cuMemsetD32Async((CUdeviceptr)d_data->get(), ui, len, hStream));
   }
@@ -139,7 +139,7 @@ public:
   size_t setup_tensor(const vector<int> &shape) {
     this->shape = shape;
     size_t len = count();
-    d_data = make_shared<DeviceMemory>(len * sizeof(T));
+    d_data = make_shared<DeviceMemory>(len * sizeof(float));
     dataTensor = make_shared<TensorHandler>(shape);
     return len;
   }
@@ -151,16 +151,16 @@ public:
     return len;
   }
 
-  void set_data(const T *host) const {
+  void set_data(const float *host) const {
     size_t len = count();
-    assert(CUDA_SUCCESS == cuMemcpyHtoDAsync_v2((CUdeviceptr)d_data->get(), host, len * sizeof(T), hStream));
+    assert(CUDA_SUCCESS == cuMemcpyHtoDAsync_v2((CUdeviceptr)d_data->get(), host, len * sizeof(float), hStream));
     assert(CUDA_SUCCESS == cuStreamSynchronize(hStream));
   }
 
-  vector<T> get_data() const {
+  vector<float> get_data() const {
     size_t len = count();
-    vector<T> host(len);
-    assert(CUDA_SUCCESS == cuMemcpyDtoHAsync_v2(host.data(), (CUdeviceptr)d_data->get(), len * sizeof(T), hStream));
+    vector<float> host(len);
+    assert(CUDA_SUCCESS == cuMemcpyDtoHAsync_v2(host.data(), (CUdeviceptr)d_data->get(), len * sizeof(float), hStream));
     assert(CUDA_SUCCESS == cuStreamSynchronize(hStream));
     return move(host);
   }
@@ -175,14 +175,14 @@ public:
   }
 
   Tensor copy() const {
-    Tensor<T> ans(this->shape);
-    assert(CUDA_SUCCESS == cuMemcpyDtoDAsync_v2((CUdeviceptr)ans.d_data->get(), (CUdeviceptr)this->d_data->get(), ans.count() * sizeof(T), hStream));
+    Tensor ans(this->shape);
+    assert(CUDA_SUCCESS == cuMemcpyDtoDAsync_v2((CUdeviceptr)ans.d_data->get(), (CUdeviceptr)this->d_data->get(), ans.count() * sizeof(float), hStream));
     return move(ans);
   }
 
-  Tensor matmul(const Tensor<T> &that, bool transposeThis = false, bool transposeThat = false) const {
+  Tensor matmul(const Tensor &that, bool transposeThis = false, bool transposeThat = false) const {
     // ans = &that * this;
-    const Tensor<T> *A = &that, *B = this;
+    const Tensor *A = &that, *B = this;
     bool transposeA = transposeThat, transposeB = transposeThis;
 
     assert(A->shape.size() == 2 && B->shape.size() == 2);
@@ -195,25 +195,25 @@ public:
       swap(bx, by);
     assert(ay == bx);
 
-    Tensor<T> ans({by, ax});
+    Tensor ans({by, ax});
 
     float alpha = 1.0f, beta = 0.0f;
     assert(0 == cublasSgemm(cublasHandle,
                             transposeA ? CUBLAS_OP_T : CUBLAS_OP_N, transposeB ? CUBLAS_OP_T : CUBLAS_OP_N,
                             ax, by, ay, &alpha,
-                            (T*)A->d_data->get(), A->shape[1], // X
-                            (T*)B->d_data->get(), B->shape[1],  // Y
-                            &beta, (T*)ans.d_data->get(), ans.shape[1]));   // Z
+                            (float*)A->d_data->get(), A->shape[1], // X
+                            (float*)B->d_data->get(), B->shape[1],  // Y
+                            &beta, (float*)ans.d_data->get(), ans.shape[1]));   // Z
     return ans;
   }
 
-  Tensor matadd(const Tensor<T> &that) const {
+  Tensor matadd(const Tensor &that) const {
     assert(this->shape == that.shape);
     float alpha = 1.0f;
     Tensor ans(this->shape, 0.0f);
-    assert(CUBLAS_STATUS_SUCCESS == cublasSaxpy(cublasHandle, count(), &alpha, (T*)this->d_data->get(), 1, (T*)ans.d_data->get(), 1));
+    assert(CUBLAS_STATUS_SUCCESS == cublasSaxpy(cublasHandle, count(), &alpha, (float*)this->d_data->get(), 1, (float*)ans.d_data->get(), 1));
     // Tensor ans = this->copy();
-    assert(CUBLAS_STATUS_SUCCESS == cublasSaxpy(cublasHandle, count(), &alpha, (T*)that.d_data->get(), 1, (T*)ans.d_data->get(), 1));
+    assert(CUBLAS_STATUS_SUCCESS == cublasSaxpy(cublasHandle, count(), &alpha, (float*)that.d_data->get(), 1, (float*)ans.d_data->get(), 1));
     return ans;
   }
 };
