@@ -1,7 +1,7 @@
 #ifndef __LITEDNN__MODEL__
 #define __LITEDNN__MODEL__
 
-float get_loss(const Tensor<float> &data_loss) {
+float get_loss(const Tensor &data_loss) {
   vector<float> loss_data = data_loss.get_data();
   float loss = 0.0f;
   for (int i = 0; i < loss_data.size(); ++i) {
@@ -13,7 +13,7 @@ float get_loss(const Tensor<float> &data_loss) {
   return loss;
 }
 
-float get_accuracy(const Tensor<float> &data_pred, const Tensor<float> &data_label) {
+float get_accuracy(const Tensor &data_pred, const Tensor &data_label) {
   assert(data_pred.shape.size() == 2 && data_pred.shape == data_label.shape);
 
   vector<float> real_data = data_label.get_data();
