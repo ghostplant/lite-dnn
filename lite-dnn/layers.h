@@ -304,9 +304,9 @@ public:
     input_shape = shape;
     output_shape = {shape[0], channels};
     if (!kernel_init)
-      w = Tensor({channels, shape[1]}, true);
+      w = Tensor({shape[1], channels}, true);
     else
-      w = Tensor({channels, shape[1]}, (float)atof(kernel_init));
+      w = Tensor({shape[1], channels}, (float)atof(kernel_init));
     return output_shape;
   }
 
@@ -315,8 +315,8 @@ public:
   }
 
   Tensor forward(const Tensor &x) const {
-    auto out = x.matmul(w, false, true);
-    // out = x * w' + ones * bias';
+    auto out = x.matmul(w, false, false);
+    // y = x * w + ones * bias';
     assert(out.shape.size() == 2 && bias.shape.size() == 2 && out.shape[1] == bias.shape[1] && out.shape[0] <= ones.shape[0]);
 
     float alpha = 1.0f;
@@ -332,11 +332,14 @@ public:
   }
 
   Tensor backward(const Tensor &dy, const Tensor &y, const Tensor &x, bool lastLayer = false) {
-    g_w = dy.matmul(x, true, false);
+    assert(dy.shape == y.shape);
+    // dw = x' * dy
+    g_w = x.matmul(dy, true, false);
     g_bias = ones.reshape({x.shape[0], 1}, true).matmul(dy, true, false);
     if (lastLayer)
       return dy;
-    return dy.matmul(w);
+    // dx = dy * w'
+    return dy.matmul(w, false, true);
   }
 
   void learn(float lr) const {
