@@ -12,7 +12,7 @@ static pair<vector<int>, vector<float>> ReadNormalDataset(const char* dataset) {
   const int UBYTE_MAGIC = 0x800;
   FILE *fp;
   if ((fp = fopen(dataset, "rb")) == NULL) {
-    fprintf(stderr, "Cannot open file: %s\n", dataset);
+    printf("Cannot open file: %s\n", dataset);
     exit(1);
   }
 

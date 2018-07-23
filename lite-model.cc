@@ -155,7 +155,7 @@ static inline unsigned long get_microseconds() {
 
 using std::unordered_map;
 
-auto image_generator(string path, int height = 229, int width = 229, int cache_size = 256) {
+auto image_generator(string path, int height = 229, int width = 229, int cache_size = 256, int thread_para = 4) {
 
   struct Generator {
     unordered_map<string, vector<string>> dict;
@@ -167,9 +167,8 @@ auto image_generator(string path, int height = 229, int width = 229, int cache_s
     vector<pthread_t> tids;
     pthread_mutex_t m_lock;
     bool thread_stop;
-    unordered_map<string, vector<vector<float>>> cached;
 
-    Generator(const string &path, int height, int width, int cache_size): height(height), width(width), cache_size(cache_size), channel(3) {
+    Generator(const string &path, int height, int width, int cache_size, int thread_para): height(height), width(width), cache_size(cache_size), tids(thread_para), channel(3) {
       pthread_mutex_init(&m_lock, 0);
       thread_stop = 0;
 
@@ -201,30 +200,10 @@ auto image_generator(string path, int height = 229, int width = 229, int cache_s
       }
       n_class = keyset.size();
 
-      tids.resize(1);
-      for (int i = 0; i < tids.size(); ++i)
-        assert(!pthread_create(&tids[i], NULL, Generator::start, this));
-
       printf("Total %d samples found with %d classes.\n", samples, n_class);
 
-      /*long x = time(0);
-      for (int i = 0; i < keyset.size(); ++i) {
-        for (auto &it: dict[keyset[i]]) {
-          vector<float> chw(channel * height * width), l(n_class, 0.0f);
-          string path = keyset[i] + it;
-          bool ans = get_image_data(path, chw.data(), i, l.data());
-
-          pthread_mutex_lock(&m_lock);
-          if (ans)
-            cached[path] = {move(chw), move(l)};
-          else
-            cached[path] = {};
-          pthread_mutex_unlock(&m_lock);
-        }
-      }
-      long y = time(0);
-      printf("Done %zd\n", y - x);
-      exit(0);*/
+      for (int i = 0; i < tids.size(); ++i)
+        assert(!pthread_create(&tids[i], NULL, Generator::start, this));
     }
 
     ~Generator() {
@@ -259,6 +238,15 @@ auto image_generator(string path, int height = 229, int width = 229, int cache_s
 
     void background_generator() {
       while (!thread_stop) {
+        vector<float> chw(channel * height * width), l(n_class, 0.0f);
+        while (1) {
+          int c = rand() % dict.size();
+          auto &files = dict[keyset[c]];
+          int it = rand() % files.size();
+          if (get_image_data(keyset[c] + files[it], chw.data(), c, l.data()))
+            break;
+        }
+
         while (!thread_stop) {
           pthread_mutex_lock(&m_lock);
           if (q_chw.size() >= cache_size) {
@@ -269,13 +257,7 @@ auto image_generator(string path, int height = 229, int width = 229, int cache_s
         }
         if (thread_stop)
           continue;
-
-        int c = rand() % dict.size();
-        auto &files = dict[keyset[c]];
-        int it = rand() % files.size();
-
-        // auto &data = cached[keyset[c] + files[it]]; if (data.size() > 0) q_chw.push(data[0]), q_l.push(data[1]);
-        vector<float> chw(channel * height * width), l(n_class, 0.0f); if (get_image_data(keyset[c] + files[it], chw.data(), c, l.data())) q_chw.push(move(chw)), q_l.push(move(l));
+        q_chw.push(move(chw)), q_l.push(move(l));
 
         pthread_mutex_unlock(&m_lock);
       }
@@ -318,7 +300,7 @@ auto image_generator(string path, int height = 229, int width = 229, int cache_s
 
   if (path.size() > 0 && path[path.size() - 1] != '/')
     path += '/';
-  return make_unique<Generator>(path, height, width, cache_size);
+  return make_unique<Generator>(path, height, width, cache_size, thread_para);
 }
 
 auto array_generator(const char* images_ubyte, const char* labels_ubyte) {
@@ -388,8 +370,8 @@ auto array_generator(const char* images_ubyte, const char* labels_ubyte) {
 int main(int argc, char **argv) {
   Tensor::init();
 
-  // auto gen = image_generator("/docker/PetImages", 32, 32);
-  auto gen = array_generator(MNIST_IMAGES, MNIST_LABELS);
+  // auto gen = image_generator("/docker/PetImages/Pics", 32, 32, 128, 32);
+  auto gen = array_generator(CIFAR10_IMAGES, CIFAR10_LABELS);
 
   int batch_size = 128, steps = 60000;
   vector<int> shape = {batch_size, gen->channel, gen->height, gen->width};
