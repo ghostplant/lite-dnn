@@ -407,7 +407,8 @@ int main(int argc, char **argv) {
 
     unsigned long currClock = get_microseconds();
     if (currClock >= lastClock + 1000000) {
-      printf("step = %d: lr = %.4f, loss = %.4f, acc = %.2f%%, time = %.4fs\n", k, lr, get_loss(data_loss), get_accuracy(data_output, labels), (currClock - lastClock) * 1e-6f);
+      auto loss_acc = get_loss_and_accuracy(data_output, labels);
+      printf("step = %d: lr = %.4f, loss = %.4f, accuracy = %.2f%%, time = %.4fs\n", k, lr, loss_acc.first, loss_acc.second, (currClock - lastClock) * 1e-6f);
       lastClock = currClock;
     }
   }
