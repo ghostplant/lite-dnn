@@ -60,8 +60,10 @@ vector<shared_ptr<Layer>> create_model(const char *model, int n_class) {
     layers.push_back(make_shared<Softmax>());
   } else if (!strcmp(model, "cifar10_lenet")) {
     layers.push_back(make_shared<Convolution>(32, 5, true));
+    layers.push_back(make_shared<Activation>(CUDNN_ACTIVATION_RELU));
     layers.push_back(make_shared<Pooling>(2, 2, CUDNN_POOLING_MAX));
     layers.push_back(make_shared<Convolution>(64, 5, true));
+    layers.push_back(make_shared<Activation>(CUDNN_ACTIVATION_RELU));
     layers.push_back(make_shared<Pooling>(2, 2, CUDNN_POOLING_MAX));
     layers.push_back(make_shared<Dropout>(0.25));
     layers.push_back(make_shared<Flatten>());
@@ -250,14 +252,13 @@ auto image_generator(string path, int height = 229, int width = 229, int cache_s
           pthread_mutex_lock(&m_lock);
           if (q_chw.size() >= cache_size) {
             pthread_mutex_unlock(&m_lock);
-            continue;
+            if (thread_stop)
+              return;
           } else
             break;
         }
-        if (thread_stop)
-          continue;
-        q_chw.push(move(chw)), q_l.push(move(l));
 
+        q_chw.push(move(chw)), q_l.push(move(l));
         pthread_mutex_unlock(&m_lock);
       }
     }
@@ -292,7 +293,7 @@ auto image_generator(string path, int height = 229, int width = 229, int cache_s
 
       return dataset({
         Tensor({batch_size, channel, height, width}, nchw.data()),
-        Tensor({batch_size, (int)keyset.size()}, nl.data())
+        Tensor({batch_size, n_class}, nl.data())
       });
     }
   };
@@ -443,7 +444,7 @@ auto array_generator(const char* images_ubyte, const char* labels_ubyte) {
 int main(int argc, char **argv) {
   Tensor::init();
 
-  // auto gen = image_generator("/docker/PetImages/Pics", 32, 32, 128, 32);
+  // auto gen = image_generator("/docker/PetImages/Pics", 32, 32, 1024, 8);
   auto gen = array_generator(CIFAR10_IMAGES, CIFAR10_LABELS);
 
   int batch_size = 128, steps = 60000;

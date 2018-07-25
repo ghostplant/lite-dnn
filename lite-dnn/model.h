@@ -12,7 +12,7 @@ pair<float, float> get_loss_and_accuracy(const Tensor &data_pred, const Tensor &
     if (fabs(real_data[i]) >= 1e-8)
       loss += -real_data[i] * log(pred_data[i]);
   }
-  // loss /= pred_data.size();
+  loss /= pred_data.size();
 
   int tot = 0, acc = 0;
   for (int i = 0; i < data_pred.shape[0]; ++i) {
