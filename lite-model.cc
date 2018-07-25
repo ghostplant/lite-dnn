@@ -27,7 +27,6 @@
 #include <cudnn_v7.h>
 
 #include <tensor.h>
-#include <model.h>
 #include <layers.h>
 
 using namespace std;
