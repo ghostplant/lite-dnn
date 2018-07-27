@@ -12,7 +12,7 @@ public:
 
   virtual string to_string() const = 0;
 
-  virtual Tensor forward(const Tensor &x) const = 0;
+  virtual Tensor forward(const Tensor &x) = 0;
 
   virtual Tensor backward(const Tensor &dy, const Tensor &y, const Tensor &x, bool lastLayer = false) = 0;
 
@@ -38,7 +38,7 @@ public:
     return "Softmax";
   }
 
-  Tensor forward(const Tensor &x) const {
+  Tensor forward(const Tensor &x) {
     float alpha = 1.0f, beta = 0.0f;
 
     Tensor ans(x.shape);
@@ -102,7 +102,7 @@ public:
     return "Activation";
   }
 
-  Tensor forward(const Tensor &x) const {
+  Tensor forward(const Tensor &x) {
     Tensor ans(x.shape);
     float alpha = 1.0f, beta = 0.0f;
     assert(CUDNN_STATUS_SUCCESS == cudnnActivationForward(cudnnHandle, activationDesc, &alpha, x.dataTensor->get(), (float*)x.d_data->get(), &beta, ans.dataTensor->get(), (float*)ans.d_data->get()));
@@ -150,7 +150,7 @@ public:
     return "LRN";
   }
 
-  Tensor forward(const Tensor &x) const {
+  Tensor forward(const Tensor &x) {
     assert(x.shape.size() == 4);
 
     Tensor y(x.shape);
@@ -201,7 +201,7 @@ public:
     return "Pooling";
   }
 
-  Tensor forward(const Tensor &x) const {
+  Tensor forward(const Tensor &x) {
     assert(x.shape.size() == 4);
     // assert((x.shape[2] - (size - stride)) % stride == 0 && (x.shape[3] - (size - stride)) % stride == 0);
 
@@ -251,7 +251,7 @@ public:
     Tensor x(shape);
     assert(CUDNN_STATUS_SUCCESS == cudnnDropoutGetReserveSpaceSize(x.dataTensor->get(), &reversed_size));
 
-    reversed = make_shared<DeviceMemory>(states_size);
+    reversed = make_shared<DeviceMemory>(reversed_size);
     input_shape = output_shape = shape;
     return output_shape;
   }
@@ -260,7 +260,7 @@ public:
     return "Dropout";
   }
 
-  Tensor forward(const Tensor &x) const {
+  Tensor forward(const Tensor &x) {
     size_t _reversed_size;
     assert(CUDNN_STATUS_SUCCESS == cudnnDropoutGetReserveSpaceSize(x.dataTensor->get(), &_reversed_size));
     assert(_reversed_size == reversed_size);
@@ -314,7 +314,7 @@ public:
     return "Dense";
   }
 
-  Tensor forward(const Tensor &x) const {
+  Tensor forward(const Tensor &x) {
     auto out = x.matmul(w, false, false);
     // y = x * w + ones * bias';
     assert(out.shape.size() == 2 && bias.shape.size() == 2 && out.shape[1] == bias.shape[1] && out.shape[0] <= ones.shape[0]);
@@ -371,7 +371,7 @@ public:
     return "Flatten";
   }
 
-  Tensor forward(const Tensor &x) const {
+  Tensor forward(const Tensor &x) {
     return x.reshape({x.shape[0], int(x.count() / x.shape[0])});
   }
 
@@ -431,7 +431,7 @@ public:
       assert(CUDNN_STATUS_SUCCESS == cudnnDestroyConvolutionDescriptor(convDesc));
   }
 
-  Tensor forward(const Tensor &x) const {
+  Tensor forward(const Tensor &x) {
     assert(x.shape.size() == 4);
 
     float alpha = 1.0f, beta = 0.0f;
