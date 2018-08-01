@@ -38,10 +38,10 @@ vector<shared_ptr<Layer>> create_model(const char *model, int n_class) {
     layers.push_back(make_shared<Flatten>());
     layers.push_back(make_shared<Dense>(512));
     layers.push_back(make_shared<Activation>(CUDNN_ACTIVATION_RELU));
-    layers.push_back(make_shared<Dropout>(0.1));
+    // layers.push_back(make_shared<Dropout>(0.1));
     layers.push_back(make_shared<Dense>(512));
     layers.push_back(make_shared<Activation>(CUDNN_ACTIVATION_RELU));
-    layers.push_back(make_shared<Dropout>(0.1));
+    // layers.push_back(make_shared<Dropout>(0.1));
     layers.push_back(make_shared<Dense>(n_class));
     layers.push_back(make_shared<Softmax>());
   } else if (!strcmp(model, "mnist_cnn")) {
@@ -450,15 +450,6 @@ int main(int argc, char **argv) {
   vector<int> shape = {batch_size, gen->channel, gen->height, gen->width};
 
   auto model = create_model(argc > 1 ? argv[1] : "mnist_cnn", gen->n_class);
-  puts("");
-  for (int i = 0; i < model.size(); ++i) {
-    shape = model[i]->configure(shape);
-    printf("%12s, shape = (", model[i]->to_string().c_str());
-    for (int i = 0; i < shape.size(); ++i)
-      printf("%d, ", shape[i]);
-    puts(")");
-  }
-  puts("");
 
   vector<Tensor> input(model.size() + 1), dloss(model.size());
   static unsigned long lastClock = get_microseconds();
