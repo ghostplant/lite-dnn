@@ -39,12 +39,12 @@ vector<shared_ptr<Layer>> create_model(const char *model, int n_class) {
     layers.push_back(make_shared<Flatten>());
     layers.push_back(make_shared<Dense>(512));
     layers.push_back(make_shared<Activation>(CUDNN_ACTIVATION_RELU));
-    // layers.push_back(make_shared<Dropout>(0.1));
+    layers.push_back(make_shared<Dropout>(0.1));
     layers.push_back(make_shared<Dense>(512));
     layers.push_back(make_shared<Activation>(CUDNN_ACTIVATION_RELU));
-    // layers.push_back(make_shared<Dropout>(0.1));
+    layers.push_back(make_shared<Dropout>(0.1));
     layers.push_back(make_shared<Dense>(n_class));
-    layers.push_back(make_shared<Softmax>());
+    layers.push_back(make_shared<SoftmaxWithCrossEntropyLoss>());
   } else if (!strcmp(model, "mnist_cnn")) {
     layers.push_back(make_shared<Convolution>(32, 3));
     layers.push_back(make_shared<Activation>(CUDNN_ACTIVATION_RELU));
@@ -55,9 +55,9 @@ vector<shared_ptr<Layer>> create_model(const char *model, int n_class) {
     layers.push_back(make_shared<Flatten>());
     layers.push_back(make_shared<Dense>(128));
     layers.push_back(make_shared<Activation>(CUDNN_ACTIVATION_RELU));
-    layers.push_back(make_shared<Dropout>(0.5));
+    layers.push_back(make_shared<Dropout>(0.25));
     layers.push_back(make_shared<Dense>(n_class));
-    layers.push_back(make_shared<Softmax>());
+    layers.push_back(make_shared<SoftmaxWithCrossEntropyLoss>());
   } else if (!strcmp(model, "cifar10_lenet")) {
     layers.push_back(make_shared<Convolution>(32, 5, true));
     layers.push_back(make_shared<Activation>(CUDNN_ACTIVATION_RELU));
@@ -71,7 +71,7 @@ vector<shared_ptr<Layer>> create_model(const char *model, int n_class) {
     layers.push_back(make_shared<Activation>(CUDNN_ACTIVATION_RELU));
     layers.push_back(make_shared<Dropout>(0.25));
     layers.push_back(make_shared<Dense>(n_class));
-    layers.push_back(make_shared<Softmax>());
+    layers.push_back(make_shared<SoftmaxWithCrossEntropyLoss>());
   } else if (!strcmp(model, "cifar10_alexnet")) {
     layers.push_back(make_shared<Convolution>(64, 5, true));
     layers.push_back(make_shared<Activation>(CUDNN_ACTIVATION_RELU));
@@ -87,7 +87,7 @@ vector<shared_ptr<Layer>> create_model(const char *model, int n_class) {
     layers.push_back(make_shared<Dense>(192));
     layers.push_back(make_shared<Activation>(CUDNN_ACTIVATION_RELU));
     layers.push_back(make_shared<Dense>(n_class));
-    layers.push_back(make_shared<Softmax>());
+    layers.push_back(make_shared<SoftmaxWithCrossEntropyLoss>());
   } else if (!strcmp(model, "cifar10_vgg16")) {
     // Block-1
     layers.push_back(make_shared<Convolution>(64, 3, 1, 1));
@@ -132,7 +132,7 @@ vector<shared_ptr<Layer>> create_model(const char *model, int n_class) {
     layers.push_back(make_shared<Dense>(4096));
     layers.push_back(make_shared<Activation>(CUDNN_ACTIVATION_RELU));
     layers.push_back(make_shared<Dense>(n_class));
-    layers.push_back(make_shared<Softmax>());
+    layers.push_back(make_shared<SoftmaxWithCrossEntropyLoss>());
   } else {
     printf("No model of name %s found.\n", model);
     exit(1);
@@ -160,7 +160,7 @@ int main(int argc, char **argv) {
   auto gen = array_generator(CIFAR10_IMAGES, CIFAR10_LABELS);
 
   int batch_size = 128, steps = 60000;
-  vector<int> shape = {batch_size, gen->channel, gen->height, gen->width};
+  // vector<int> shape = {batch_size, gen->channel, gen->height, gen->width};
 
   auto model = create_model(argc > 1 ? argv[1] : "mnist_cnn", gen->n_class);
 
