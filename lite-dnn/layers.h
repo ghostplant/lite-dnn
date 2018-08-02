@@ -15,25 +15,24 @@ public:
 };
 
 
-class Softmax: public Layer {
+class SoftmaxWithCrossEntropyLoss: public Layer {
 
 public:
-  Softmax() {
+  SoftmaxWithCrossEntropyLoss() {
   }
 
-  ~Softmax() {
+  ~SoftmaxWithCrossEntropyLoss() {
   }
 
   string to_string() const {
-    return "Softmax";
+    return "SoftmaxWithCrossEntropyLoss";
   }
 
   Tensor forward(const Tensor &x) {
     float alpha = 1.0f, beta = 0.0f;
 
     Tensor ans(x.shape);
-
-    assert(CUDNN_STATUS_SUCCESS == cudnnSoftmaxForward(cudnnHandle, CUDNN_SOFTMAX_ACCURATE, CUDNN_SOFTMAX_MODE_CHANNEL,
+    assert(CUDNN_STATUS_SUCCESS == cudnnSoftmaxForward(cudnnHandle, CUDNN_SOFTMAX_ACCURATE, CUDNN_SOFTMAX_MODE_INSTANCE,
         &alpha, x.dataTensor->get(), (float*)x.d_data->get(), &beta, ans.dataTensor->get(), (float*)ans.d_data->get()));
     return ans;
   }
@@ -59,7 +58,7 @@ public:
     Tensor dx(x.shape, 0.0f);
     // float alpha = -float(count() / this->shape[0]) / this->shape[0], beta = 0.0f;
     float alpha = 1.0f, beta = 0.0f;
-    assert(CUDNN_STATUS_SUCCESS == cudnnSoftmaxBackward(cudnnHandle, CUDNN_SOFTMAX_ACCURATE, CUDNN_SOFTMAX_MODE_CHANNEL,
+    assert(CUDNN_STATUS_SUCCESS == cudnnSoftmaxBackward(cudnnHandle, CUDNN_SOFTMAX_ACCURATE, CUDNN_SOFTMAX_MODE_INSTANCE,
       &alpha, y.dataTensor->get(), (float*)y.d_data->get(), dy.dataTensor->get(), (float*)dy.d_data->get(),
       &beta, dx.dataTensor->get(), (float*)dx.d_data->get()));
     return dx;*/
@@ -225,14 +224,13 @@ public:
   }
 
   Tensor forward(const Tensor &x) {
-    if (reversed_size == ~0LU) {
-      assert(CUDNN_STATUS_SUCCESS == cudnnDropoutGetReserveSpaceSize(x.dataTensor->get(), &reversed_size));
-      reversed = make_shared<DeviceMemory>(reversed_size);
-    }
-
     size_t _reversed_size;
     assert(CUDNN_STATUS_SUCCESS == cudnnDropoutGetReserveSpaceSize(x.dataTensor->get(), &_reversed_size));
-    assert(_reversed_size == reversed_size);
+
+    if (reversed_size == ~0LU || _reversed_size > reversed_size) {
+      reversed_size = _reversed_size;
+      reversed = make_shared<DeviceMemory>(reversed_size);
+    }
 
     Tensor ans(x.shape);
     assert(CUDNN_STATUS_SUCCESS == cudnnDropoutForward(cudnnHandle, dropDesc, x.dataTensor->get(), (float*)x.d_data->get(),
@@ -242,9 +240,10 @@ public:
 
   Tensor backward(const Tensor &dy, const Tensor &y, const Tensor &x, bool lastLayer = false) {
     assert(CUDNN_STATUS_SUCCESS == cudnnRestoreDropoutDescriptor(dropDesc, cudnnHandle, drop_prob, states->get(), states_size, seed));
+
     size_t _reversed_size;
     assert(CUDNN_STATUS_SUCCESS == cudnnDropoutGetReserveSpaceSize(y.dataTensor->get(), &_reversed_size));
-    assert(_reversed_size == reversed_size);
+    assert(_reversed_size <= reversed_size);
 
     if (lastLayer)
       return dy;
