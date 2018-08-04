@@ -258,12 +258,36 @@ public:
 };
 
 
+class Flatten: public Layer {
+
+public:
+  Flatten() {
+  }
+
+  string to_string() const {
+    return "Flatten";
+  }
+
+  Tensor forward(const Tensor &x) {
+    return x.reshape({x.shape[0], int(x.count() / x.shape[0])});
+  }
+
+  Tensor backward(const Tensor &dy, const Tensor &y, const Tensor &x, bool lastLayer = false) {
+    return dy.reshape(x.shape);
+  }
+
+  void learn(float lr) const {
+  }
+};
+
+
 class Dense: public Layer {
+
+public:
   Tensor w, bias, ones, g_bias, g_w;
   int channels;
   const char *kernel_init;
 
-public:
   Dense(int channels, const char *kernel_init = NULL, int max_batch = 1024): channels(channels), kernel_init(kernel_init), ones({max_batch, 1}, 1.0f), bias({1, channels}, 0.0f), g_bias({1, channels}), w(), g_w() {
   }
 
@@ -283,6 +307,8 @@ public:
     auto out = x.matmul(w, false, false);
     // y = x * w + ones * bias';
     assert(out.shape.size() == 2 && bias.shape.size() == 2 && out.shape[1] == bias.shape[1] && out.shape[0] <= ones.shape[0]);
+    // auto wx_b = out.add(ones.reshape({x.shape[0], 1}, true).matmul(bias, false, false));
+    // return move(wx_b);
 
     float alpha = 1.0f;
     cublasSgemm(cublasHandle,
@@ -317,30 +343,9 @@ public:
 };
 
 
-class Flatten: public Layer {
+class Convolution: public Layer {
 
 public:
-  Flatten() {
-  }
-
-  string to_string() const {
-    return "Flatten";
-  }
-
-  Tensor forward(const Tensor &x) {
-    return x.reshape({x.shape[0], int(x.count() / x.shape[0])});
-  }
-
-  Tensor backward(const Tensor &dy, const Tensor &y, const Tensor &x, bool lastLayer = false) {
-    return dy.reshape(x.shape);
-  }
-
-  void learn(float lr) const {
-  }
-};
-
-
-class Convolution: public Layer {
   int filters, kernel_size, stride, padding;
   Tensor w_krnl, w_bias, g_krnl, g_bias;
   bool use_bias;
@@ -348,7 +353,6 @@ class Convolution: public Layer {
   cudnnConvolutionDescriptor_t convDesc;
   cudnnFilterDescriptor_t filterDesc;
 
-public:
   Convolution(int filters, int kernel_size, int stride = 1, int padding = 0, bool use_bias = false): w_krnl(), w_bias(), g_krnl(), g_bias(),
       filters(filters), kernel_size(kernel_size), stride(stride), padding(padding), convDesc(NULL), filterDesc(NULL), use_bias(use_bias) {
   }

@@ -4,6 +4,9 @@
 #include <vector>
 #include <memory>
 #include <unordered_map>
+#include <random>
+
+#define _EPSILON 1.0e-7f
 
 using namespace std;
 
@@ -28,7 +31,6 @@ public:
   ~DeviceMemory() {
     if (d_data) {
       cached_mem[length].push_back(d_data); return;
-
       assert(CUDA_SUCCESS == cuMemFree_v2((CUdeviceptr)d_data));
     }
   }
@@ -101,20 +103,27 @@ public:
 
     if (!random)
       return;
-    // glorot_normal
+    /* glorot_normal
     float receptive = 0.5f;
     for (int i = 2; i < shape.size(); ++i)
       receptive *= shape[i];
     assert(shape.size() >= 2);
     float limit = sqrt(3.0f / max(1.0f, (shape[0] + shape[1]) * receptive));
+    r[i] = rand() * 2.0f * limit / RAND_MAX - limit;
+    */
+
+    float feed = 1.0f;
+    for (int i = 1; i < shape.size(); ++i)
+      feed *= shape[i];
+    feed = sqrt(2.0f / feed);
 
     auto random_uniform = [&]() {
-      // srand(shape.size());
-      // devi = sqrt(avg2 - avg1 * avg1);
+      std::default_random_engine generator;
+      std::normal_distribution<float> normal(0.0f, 1.0f);
 
       vector<float> r(len);
       for (int i = 0; i < r.size(); ++i)
-        r[i] = rand() * 2.0f * limit / RAND_MAX - limit;
+        r[i] = normal(generator) * feed;
       return move(r);
     };
 
@@ -207,6 +216,14 @@ public:
     return ans;
   }
 
+  float energy() {
+    double ans = 0.0;
+    auto d = this->get_data();
+    for (auto it: d)
+      ans += it * it;
+    return ans;
+  }
+
   Tensor add(const Tensor &that) const {
     assert(this->shape == that.shape);
     float alpha = 1.0f;
@@ -215,6 +232,30 @@ public:
     // Tensor ans = this->copy();
     assert(CUBLAS_STATUS_SUCCESS == cublasSaxpy(cublasHandle, count(), &alpha, (float*)that.d_data->get(), 1, (float*)ans.d_data->get(), 1));
     return ans;
+  }
+
+  Tensor clip_by_value(float min_value, float max_value) const {
+    Tensor left(this->shape, min_value);
+    Tensor right(this->shape, max_value);
+    Tensor interm(this->shape);
+
+    float alpha = 1.0f, beta = 0.0f;
+    cudnnOpTensorDescriptor_t op_desc;
+    cudnnCreateOpTensorDescriptor(&op_desc);
+
+    cudnnSetOpTensorDescriptor(op_desc, CUDNN_OP_TENSOR_MAX, CUDNN_DATA_FLOAT, CUDNN_NOT_PROPAGATE_NAN);
+    assert(CUDNN_STATUS_SUCCESS == cudnnOpTensor(cudnnHandle, op_desc,
+      &alpha, this->dataTensor->get(), (float*)left.d_data->get(),
+      &alpha, this->dataTensor->get(), (float*)this->d_data->get(),
+      &beta, this->dataTensor->get(), (float*)interm.d_data->get()));
+
+    cudnnSetOpTensorDescriptor(op_desc, CUDNN_OP_TENSOR_MIN, CUDNN_DATA_FLOAT, CUDNN_NOT_PROPAGATE_NAN);
+    assert(CUDNN_STATUS_SUCCESS == cudnnOpTensor(cudnnHandle, op_desc,
+      &alpha, this->dataTensor->get(), (float*)right.d_data->get(),
+      &alpha, this->dataTensor->get(), (float*)interm.d_data->get(),
+      &beta, this->dataTensor->get(), (float*)left.d_data->get()));
+    cudnnDestroyOpTensorDescriptor(op_desc);
+    return left;
   }
 };
 
@@ -227,8 +268,7 @@ pair<float, float> get_loss_and_accuracy(const Tensor &data_pred, const Tensor &
 
   float loss = 0.0f;
   for (int i = 0; i < pred_data.size(); ++i) {
-    if (fabs(real_data[i]) >= 1e-8)
-      loss += -real_data[i] * log(pred_data[i]);
+    loss -= real_data[i] * log(pred_data[i]) + (1.0f - real_data[i]) * log(1.0f - pred_data[i]);
   }
   loss /= pred_data.size();
 
