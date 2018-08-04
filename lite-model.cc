@@ -39,10 +39,8 @@ vector<shared_ptr<Layer>> create_model(const char *model, int n_class) {
     layers.push_back(make_shared<Flatten>());
     layers.push_back(make_shared<Dense>(512));
     layers.push_back(make_shared<Activation>(CUDNN_ACTIVATION_RELU));
-    layers.push_back(make_shared<Dropout>(0.1));
     layers.push_back(make_shared<Dense>(512));
     layers.push_back(make_shared<Activation>(CUDNN_ACTIVATION_RELU));
-    layers.push_back(make_shared<Dropout>(0.1));
     layers.push_back(make_shared<Dense>(n_class));
     layers.push_back(make_shared<SoftmaxWithCrossEntropyLoss>());
   } else if (!strcmp(model, "mnist_cnn")) {
@@ -156,7 +154,7 @@ static inline unsigned long get_microseconds() {
 int main(int argc, char **argv) {
   Tensor::init();
 
-  // auto gen = image_generator("/docker/PetImages/Pics", 32, 32, 1024, 8);
+  // auto gen = image_generator("/docker/PetImages/Pics", 224, 224, 1024, 8);
   auto gen = array_generator(CIFAR10_IMAGES, CIFAR10_LABELS);
 
   int batch_size = 128, steps = 60000;
@@ -170,12 +168,13 @@ int main(int argc, char **argv) {
   for (int k = 0, it = 0; k < steps; ++k) {
     auto batch = gen->next_batch(batch_size); auto &images = batch.images, &labels = batch.labels;
 
-    float lr = - float(0.05f * pow((1.0f + 0.0001f * k), -0.75f));
+    float lr = -float(0.05f * pow((1.0f + 0.0001f * k), -0.75f));
 
     input[0] = images;
     for (int i = 0; i < model.size(); ++i)
       input[i + 1] = model[i]->forward(input[i]);
-    auto data_output = input.back();
+    auto &outs = input[input.size() - 1];
+    outs = outs.clip_by_value(_EPSILON, 1.0f - _EPSILON);
 
     dloss[model.size() - 1] = model.back()->backward(input.back(), labels, input.back());
     for (int i = model.size() - 2; i >= 0; --i)
@@ -184,8 +183,8 @@ int main(int argc, char **argv) {
 
     unsigned long currClock = get_microseconds();
     if (currClock >= lastClock + 1000000) {
-      auto loss_acc = get_loss_and_accuracy(data_output, labels);
-      printf("step = %d: lr = %.4f, loss = %.4f, accuracy = %.2f%%, time = %.4fs\n", k, lr, loss_acc.first, loss_acc.second, (currClock - lastClock) * 1e-6f);
+      auto loss_acc = get_loss_and_accuracy(outs, labels);
+      printf("==> step = %d: lr = %.4f, loss = %.4f, accuracy = %.2f%%, time = %.4fs\n", k, lr, loss_acc.first, loss_acc.second, (currClock - lastClock) * 1e-6f);
       lastClock = currClock;
     }
   }
