@@ -12,6 +12,8 @@ public:
   virtual Tensor backward(const Tensor &dy, const Tensor &y, const Tensor &x, bool lastLayer = false) = 0;
 
   virtual void learn(float lr) const = 0;
+
+  virtual vector<Tensor> get_weights() const = 0;
 };
 
 
@@ -66,6 +68,10 @@ public:
 
   void learn(float lr) const {
   }
+
+  vector<Tensor> get_weights() const {
+    return {};
+  }
 };
 
 
@@ -104,6 +110,10 @@ public:
   }
 
   void learn(float lr) const {
+  }
+
+  vector<Tensor> get_weights() const {
+    return {};
   }
 };
 
@@ -152,6 +162,10 @@ public:
 
   void learn(float lr) const {
   }
+
+  vector<Tensor> get_weights() const {
+    return {};
+  }
 };
 
 
@@ -195,6 +209,10 @@ public:
   }
 
   void learn(float lr) const {
+  }
+
+  vector<Tensor> get_weights() const {
+    return {};
   }
 };
 
@@ -255,6 +273,10 @@ public:
 
   void learn(float lr) const {
   }
+
+  vector<Tensor> get_weights() const {
+    return {};
+  }
 };
 
 
@@ -277,6 +299,10 @@ public:
   }
 
   void learn(float lr) const {
+  }
+
+  vector<Tensor> get_weights() const {
+    return {};
   }
 };
 
@@ -339,6 +365,10 @@ public:
 
     assert(bias.shape == g_bias.shape);
     assert(CUBLAS_STATUS_SUCCESS == cublasSaxpy(cublasHandle, bias.count(), &lr, (float*)g_bias.d_data->get(), 1, (float*)bias.d_data->get(), 1));
+  }
+
+  vector<Tensor> get_weights() const {
+    return {w, bias};
   }
 };
 
@@ -472,6 +502,12 @@ public:
       assert(w_bias.shape == g_bias.shape);
       assert(CUBLAS_STATUS_SUCCESS == cublasSaxpy(cublasHandle, w_bias.count(), &lr, (float*)g_bias.d_data->get(), 1, (float*)w_bias.d_data->get(), 1));
     }
+  }
+
+  vector<Tensor> get_weights() const {
+    if (use_bias)
+      return {w_krnl, w_bias};
+    return {w_krnl};
   }
 };
 
