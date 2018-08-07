@@ -30,6 +30,9 @@
 #include <layers.h>
 #include <dataset.h>
 
+#define die_if(__cond__, __desc__, ...) ({if (__cond__) { printf("  [@] \033[31m" __desc__ "\033[0m", ##__VA_ARGS__); fflush(stdout); exit(1);}})
+
+
 using namespace std;
 
 
@@ -140,7 +143,7 @@ vector<shared_ptr<Layer>> create_model(const char *model, int n_class) {
 
 static inline unsigned long get_microseconds() {
   struct timeval tv;
-  gettimeofday(&tv, NULL);
+  gettimeofday(&tv, nullptr);
   return tv.tv_sec * 1000000LU + tv.tv_usec;
 }
 
@@ -181,6 +184,24 @@ int main(int argc, char **argv) {
       dloss[i] = model[i]->backward(dloss[i + 1], input[i + 1], input[i], i == 0), model[i]->learn(lr);
     auto data_loss = dloss.back();
 
+    if (!k) {
+      {
+      FILE *fp = fopen("weights.lw", "rb");
+      if (fp != nullptr) {
+        puts("  [@] Loading saved weights ..");
+        for (auto &layer: model) {
+          auto sym_weights = layer->get_weights();
+          for (auto &weight: sym_weights) {
+            vector<float> host(weight.count());
+            die_if(host.size() != fread(host.data(), sizeof(float), host.size(), fp), "The file `weights.lw` doesn't match current model.");
+            weight.set_data(host.data());
+          }
+        }
+        fclose(fp);
+      }
+      }
+    }
+
     unsigned long currClock = get_microseconds();
     if (currClock >= lastClock + 1000000) {
       auto loss_acc = get_loss_and_accuracy(outs, labels);
@@ -188,5 +209,18 @@ int main(int argc, char **argv) {
       lastClock = currClock;
     }
   }
+
+  { puts("  [@] Saving saved weights ..");
+
+  FILE *fp = fopen("weights.lw", "wb");
+  assert(fp != nullptr);
+  for (auto &layer: model) {
+    auto sym_weights = layer->get_weights();
+    for (auto &weight: sym_weights) {
+      auto host = weight.get_data();
+      assert(host.size() == fwrite(host.data(), sizeof(float), host.size(), fp));
+    }
+  }
+  fclose(fp); }
   return 0;
 }
