@@ -9,15 +9,23 @@ public:
 
   virtual Tensor forward(const Tensor &x) = 0;
 
-  virtual Tensor backward(const Tensor &dy, const Tensor &y, const Tensor &x, bool lastLayer = false) = 0;
+  virtual Tensor backward(const Tensor &dy, bool lastLayer = false) = 0;
 
-  virtual void learn(float lr) const = 0;
 
-  virtual vector<Tensor> get_weights() const = 0;
+  virtual vector<Tensor> get_weights() const {
+    return {};
+  }
+
+  virtual vector<Tensor> get_gradients() const {
+    return {};
+  }
 
   virtual vector<int> configure(const vector<int> &input_shape) {
     return input_shape;
   }
+
+protected:
+  vector<Tensor> cacheTensors;
 };
 
 
@@ -52,14 +60,7 @@ public:
     return x;
   }
 
-  Tensor backward(const Tensor &dy, const Tensor &y, const Tensor &x, bool lastLayer = false) {
-    return {};
-  }
-
-  void learn(float lr) const {
-  }
-
-  vector<Tensor> get_weights() const {
+  Tensor backward(const Tensor &dy, bool lastLayer = false) {
     return {};
   }
 };
@@ -81,44 +82,25 @@ public:
   Tensor forward(const Tensor &x) {
     float alpha = 1.0f, beta = 0.0f;
 
-    Tensor ans(x.shape);
+    Tensor y(x.shape);
     assert(CUDNN_STATUS_SUCCESS == cudnnSoftmaxForward(cudnnHandle, CUDNN_SOFTMAX_ACCURATE, CUDNN_SOFTMAX_MODE_INSTANCE,
-        &alpha, x.dataTensor->get(), (float*)x.d_data->get(), &beta, ans.dataTensor->get(), (float*)ans.d_data->get()));
-    return ans;
+        &alpha, x.dataTensor->get(), (float*)x.d_data->get(), &beta, y.dataTensor->get(), (float*)y.d_data->get()));
+
+    cacheTensors = {y};
+    return y;
   }
 
-  Tensor backward(const Tensor &dy, const Tensor &y, const Tensor &x, bool lastLayer = false) {
-    assert(x.shape == y.shape);
+  Tensor backward(const Tensor &dy, bool lastLayer = false) {
+    Tensor &y = cacheTensors[0];
+    assert(dy.shape == y.shape);
 
-    float posi = 1.0f / x.shape[0], nega = -1.0f / x.shape[0], batch = 1.0f / x.shape[0];
-    size_t len = x.count();
+    float posi = 1.0f / dy.shape[0], nega = -1.0f / dy.shape[0];
+    size_t len = dy.count();
 
-    // Tensor dx = y;
-    // assert(CUDNN_STATUS_SUCCESS == cudnnAddTensor(cudnnHandle,
-    //   &posi, this->dataTensor->get(), (float*)this->d_data->get(), &nega, dx.dataTensor->get(), (float*)dx.d_data->get()));
-
-    Tensor dx(x.shape, 0.0f);
-    cublasSaxpy(cublasHandle, len, &posi, (float*)x.d_data->get(), 1, (float*)dx.d_data->get(), 1);
-    cublasSaxpy(cublasHandle, len, &nega, (float*)y.d_data->get(), 1, (float*)dx.d_data->get(), 1);
+    Tensor dx(dy.shape, 0.0f);
+    cublasSaxpy(cublasHandle, len, &posi, (float*)y.d_data->get(), 1, (float*)dx.d_data->get(), 1);
+    cublasSaxpy(cublasHandle, len, &nega, (float*)dy.d_data->get(), 1, (float*)dx.d_data->get(), 1);
     return move(dx);
-
-    /*if (lastLayer)
-      return dy;
-
-    Tensor dx(x.shape, 0.0f);
-    // float alpha = -float(count() / this->shape[0]) / this->shape[0], beta = 0.0f;
-    float alpha = 1.0f, beta = 0.0f;
-    assert(CUDNN_STATUS_SUCCESS == cudnnSoftmaxBackward(cudnnHandle, CUDNN_SOFTMAX_ACCURATE, CUDNN_SOFTMAX_MODE_INSTANCE,
-      &alpha, y.dataTensor->get(), (float*)y.d_data->get(), dy.dataTensor->get(), (float*)dy.d_data->get(),
-      &beta, dx.dataTensor->get(), (float*)dx.d_data->get()));
-    return dx;*/
-  }
-
-  void learn(float lr) const {
-  }
-
-  vector<Tensor> get_weights() const {
-    return {};
   }
 };
 
@@ -141,27 +123,24 @@ public:
   }
 
   Tensor forward(const Tensor &x) {
-    Tensor ans(x.shape);
+    Tensor y(x.shape);
     float alpha = 1.0f, beta = 0.0f;
-    assert(CUDNN_STATUS_SUCCESS == cudnnActivationForward(cudnnHandle, activationDesc, &alpha, x.dataTensor->get(), (float*)x.d_data->get(), &beta, ans.dataTensor->get(), (float*)ans.d_data->get()));
-    return move(ans);
+    assert(CUDNN_STATUS_SUCCESS == cudnnActivationForward(cudnnHandle, activationDesc, &alpha, x.dataTensor->get(), (float*)x.d_data->get(), &beta, y.dataTensor->get(), (float*)y.d_data->get()));
+
+    cacheTensors = {x, y};
+    return move(y);
   }
 
-  Tensor backward(const Tensor &dy, const Tensor &y, const Tensor &x, bool lastLayer = false) {
+  Tensor backward(const Tensor &dy, bool lastLayer = false) {
     if (lastLayer)
       return dy;
+    Tensor &x = cacheTensors[0], &y = cacheTensors[1];
+
     Tensor dx = dy;
     float alpha = 1.0f, beta = 0.0f;
     assert(CUDNN_STATUS_SUCCESS == cudnnActivationBackward(cudnnHandle, activationDesc, &alpha, y.dataTensor->get(), (float*)y.d_data->get(),
         dy.dataTensor->get(), (float*)dy.d_data->get(), x.dataTensor->get(), (float*)x.d_data->get(), &beta, dx.dataTensor->get(), (float*)dx.d_data->get()));
     return move(dx);
-  }
-
-  void learn(float lr) const {
-  }
-
-  vector<Tensor> get_weights() const {
-    return {};
   }
 };
 
@@ -194,10 +173,14 @@ public:
     float alpha = 1.0f, beta = 0.0f;
     assert(CUDNN_STATUS_SUCCESS == cudnnLRNCrossChannelForward(cudnnHandle, lrnDesc, CUDNN_LRN_CROSS_CHANNEL_DIM1,
         &alpha, x.dataTensor->get(), (float*)x.d_data->get(), &beta, y.dataTensor->get(), (float*)y.d_data->get()));
+
+    cacheTensors = {x, y};
     return move(y);
   }
 
-  Tensor backward(const Tensor &dy, const Tensor &y, const Tensor &x, bool lastLayer = false) {
+  Tensor backward(const Tensor &dy, bool lastLayer = false) {
+    Tensor &x = cacheTensors[0], &y = cacheTensors[1];
+
     Tensor dx(x.shape);
     if (lastLayer)
       return dx;
@@ -206,13 +189,6 @@ public:
         &alpha, y.dataTensor->get(), (float*)y.d_data->get(), dy.dataTensor->get(), (float*)dy.d_data->get(),
         x.dataTensor->get(), (float*)x.d_data->get(), &beta, dx.dataTensor->get(), (float*)dx.d_data->get()));
     return move(dx);
-  }
-
-  void learn(float lr) const {
-  }
-
-  vector<Tensor> get_weights() const {
-    return {};
   }
 };
 
@@ -248,24 +224,21 @@ public:
     Tensor y(this->configure(x.shape));
     float alpha = 1.0f, beta = 0.0f;
     assert(CUDNN_STATUS_SUCCESS == cudnnPoolingForward(cudnnHandle, poolDesc, &alpha, x.dataTensor->get(), (float*)x.d_data->get(), &beta, y.dataTensor->get(), (float*)y.d_data->get()));
+
+    cacheTensors = {x, y};
     return move(y);
   }
 
-  Tensor backward(const Tensor &dy, const Tensor &y, const Tensor &x, bool lastLayer = false) {
+  Tensor backward(const Tensor &dy, bool lastLayer = false) {
     if (lastLayer)
       return dy;
+    Tensor &x = cacheTensors[0], &y = cacheTensors[1];
+
     Tensor dx(x.shape);
     float alpha = 1.0f, beta = 0.0f;
     assert(CUDNN_STATUS_SUCCESS == cudnnPoolingBackward(cudnnHandle, poolDesc, &alpha, y.dataTensor->get(), (float*)y.d_data->get(), dy.dataTensor->get(), (float*)dy.d_data->get(),
                          x.dataTensor->get(), (float*)x.d_data->get(), &beta, dx.dataTensor->get(), (float*)dx.d_data->get()));
     return move(dx);
-  }
-
-  void learn(float lr) const {
-  }
-
-  vector<Tensor> get_weights() const {
-    return {};
   }
 };
 
@@ -303,13 +276,15 @@ public:
       reversed = make_shared<DeviceMemory>(reversed_size);
     }
 
-    Tensor ans(x.shape);
+    Tensor y(x.shape);
     assert(CUDNN_STATUS_SUCCESS == cudnnDropoutForward(cudnnHandle, dropDesc, x.dataTensor->get(), (float*)x.d_data->get(),
-      ans.dataTensor->get(), (float*)ans.d_data->get(), reversed->get(), reversed_size));
-    return move(ans);
+      y.dataTensor->get(), (float*)y.d_data->get(), reversed->get(), reversed_size));
+    cacheTensors = {x, y};
+    return move(y);
   }
 
-  Tensor backward(const Tensor &dy, const Tensor &y, const Tensor &x, bool lastLayer = false) {
+  Tensor backward(const Tensor &dy, bool lastLayer = false) {
+    Tensor &x = cacheTensors[0], &y = cacheTensors[1];
     assert(CUDNN_STATUS_SUCCESS == cudnnRestoreDropoutDescriptor(dropDesc, cudnnHandle, drop_prob, states->get(), states_size, seed));
 
     size_t _reversed_size;
@@ -322,13 +297,6 @@ public:
     assert(CUDNN_STATUS_SUCCESS == cudnnDropoutBackward(cudnnHandle, dropDesc, dy.dataTensor->get(), (float*)dy.d_data->get(),
       dx.dataTensor->get(), (float*)dx.d_data->get(), reversed->get(), reversed_size));
     return move(dx);
-  }
-
-  void learn(float lr) const {
-  }
-
-  vector<Tensor> get_weights() const {
-    return {};
   }
 };
 
@@ -351,18 +319,13 @@ public:
   }
 
   Tensor forward(const Tensor &x) {
+    cacheTensors = {x};
     return x.reshape(this->configure(x.shape));
   }
 
-  Tensor backward(const Tensor &dy, const Tensor &y, const Tensor &x, bool lastLayer = false) {
+  Tensor backward(const Tensor &dy, bool lastLayer = false) {
+    Tensor &x = cacheTensors[0];
     return dy.reshape(x.shape);
-  }
-
-  void learn(float lr) const {
-  }
-
-  vector<Tensor> get_weights() const {
-    return {};
   }
 };
 
@@ -392,25 +355,27 @@ public:
   Tensor forward(const Tensor &x) {
     assert(x.shape.size() == 2);
 
-    auto out = x.matmul(w, false, false);
+    auto y = x.matmul(w, false, false);
     // y = x * w + ones * bias';
-    assert(out.shape.size() == 2 && bias.shape.size() == 2 && out.shape[1] == bias.shape[1] && out.shape[0] <= ones.shape[0]);
-    // auto wx_b = out.add(ones.reshape({x.shape[0], 1}, true).matmul(bias, false, false));
+    assert(y.shape.size() == 2 && bias.shape.size() == 2 && y.shape[1] == bias.shape[1] && y.shape[0] <= ones.shape[0]);
+    // auto wx_b = y.add(ones.reshape({x.shape[0], 1}, true).matmul(bias, false, false));
     // return move(wx_b);
 
     float alpha = 1.0f;
     cublasSgemm(cublasHandle,
                 CUBLAS_OP_N, CUBLAS_OP_N,
-                bias.shape[1], out.shape[0], 1,
+                bias.shape[1], y.shape[0], 1,
                 &alpha,
                 (float*)bias.d_data->get(), bias.shape[1],  // B
                 (float*)ones.d_data->get(), 1,  // 1
                 &alpha,
-                (float*)out.d_data->get(), out.shape[1]);  // self
-    return move(out);
+                (float*)y.d_data->get(), y.shape[1]);  // self
+    cacheTensors = {x, y};
+    return move(y);
   }
 
-  Tensor backward(const Tensor &dy, const Tensor &y, const Tensor &x, bool lastLayer = false) {
+  Tensor backward(const Tensor &dy, bool lastLayer = false) {
+    Tensor &x = cacheTensors[0], &y = cacheTensors[1];
     assert(dy.shape == y.shape);
     // dw = x' * dy
     g_w = x.matmul(dy, true, false);
@@ -421,12 +386,8 @@ public:
     return dy.matmul(w, false, true);
   }
 
-  void learn(float lr) const {
-    assert(w.shape == g_w.shape);
-    assert(CUBLAS_STATUS_SUCCESS == cublasSaxpy(cublasHandle, w.count(), &lr, (float*)g_w.d_data->get(), 1, (float*)w.d_data->get(), 1));
-
-    assert(bias.shape == g_bias.shape);
-    assert(CUBLAS_STATUS_SUCCESS == cublasSaxpy(cublasHandle, bias.count(), &lr, (float*)g_bias.d_data->get(), 1, (float*)bias.d_data->get(), 1));
+  vector<Tensor> get_gradients() const {
+    return { g_w, g_bias };
   }
 
   vector<Tensor> get_weights() const {
@@ -490,33 +451,35 @@ public:
         &cu_shape[0], &cu_shape[1], &cu_shape[2], &cu_shape[3]));
     assert(output_shape == cu_shape);
 
-    Tensor ans(output_shape);
+    Tensor y(output_shape);
 
     cudnnConvolutionFwdAlgo_t convalgo;
     assert(CUDNN_STATUS_SUCCESS == cudnnGetConvolutionForwardAlgorithm(cudnnHandle, x.dataTensor->get(), filterDesc, convDesc,
-        ans.dataTensor->get(), CUDNN_CONVOLUTION_FWD_PREFER_FASTEST, 0, &convalgo));
+        y.dataTensor->get(), CUDNN_CONVOLUTION_FWD_PREFER_FASTEST, 0, &convalgo));
 
     size_t sizeInBytes;
     assert(CUDNN_STATUS_SUCCESS == cudnnGetConvolutionForwardWorkspaceSize(cudnnHandle, x.dataTensor->get(), filterDesc, convDesc,
-        ans.dataTensor->get(), convalgo, &sizeInBytes));
+        y.dataTensor->get(), convalgo, &sizeInBytes));
 
     DeviceMemory workspace(sizeInBytes);
 
     assert(CUDNN_STATUS_SUCCESS == cudnnConvolutionForward(cudnnHandle, &alpha, x.dataTensor->get(), (float*)x.d_data->get(), filterDesc,
-        (float*)w_krnl.d_data->get(), convDesc, convalgo, workspace.get(), sizeInBytes, &beta, ans.dataTensor->get(), (float*)ans.d_data->get()));
+        (float*)w_krnl.d_data->get(), convDesc, convalgo, workspace.get(), sizeInBytes, &beta, y.dataTensor->get(), (float*)y.d_data->get()));
     if (use_bias)
       assert(CUDNN_STATUS_SUCCESS == cudnnAddTensor(cudnnHandle,
-        &alpha, w_bias.dataTensor->get(), (float*)w_bias.d_data->get(), &alpha, ans.dataTensor->get(), (float*)ans.d_data->get()));
-    return move(ans);
+        &alpha, w_bias.dataTensor->get(), (float*)w_bias.d_data->get(), &alpha, y.dataTensor->get(), (float*)y.d_data->get()));
+    cacheTensors = {x, y};
+    return move(y);
   }
 
-  Tensor backward(const Tensor &dy, const Tensor &y, const Tensor &x, bool lastLayer = false) {
+  Tensor backward(const Tensor &dy, bool lastLayer = false) {
+    Tensor &x = cacheTensors[0], &y = cacheTensors[1];
     float alpha = 1.0f, beta = 0.0f;
     assert(y.shape[1] == filters);
     int n = x.shape[0], c = x.shape[1], h = x.shape[2], w = x.shape[3];
 
-    cudnnConvolutionBwdFilterAlgo_t falgo;
     cudnnConvolutionBwdDataAlgo_t dalgo;
+    cudnnConvolutionBwdFilterAlgo_t falgo;
     assert(CUDNN_STATUS_SUCCESS == cudnnGetConvolutionBackwardFilterAlgorithm(
                 cudnnHandle, x.dataTensor->get(), y.dataTensor->get(), convDesc, filterDesc,
                 CUDNN_CONVOLUTION_BWD_FILTER_PREFER_FASTEST, 0, &falgo));
@@ -561,23 +524,22 @@ public:
     return move(dx);
   }
 
-  void learn(float lr) const {
-    assert(w_krnl.shape == g_krnl.shape);
-    assert(CUBLAS_STATUS_SUCCESS == cublasSaxpy(cublasHandle, w_krnl.count(), &lr, (float*)g_krnl.d_data->get(), 1, (float*)w_krnl.d_data->get(), 1));
-
-    if (use_bias) {
-      assert(w_bias.shape == g_bias.shape);
-      assert(CUBLAS_STATUS_SUCCESS == cublasSaxpy(cublasHandle, w_bias.count(), &lr, (float*)g_bias.d_data->get(), 1, (float*)w_bias.d_data->get(), 1));
-    }
+  vector<Tensor> get_gradients() const {
+    vector<Tensor> grads = {g_krnl};
+    if (use_bias)
+      grads.push_back(g_bias);
+    return move(grads);
   }
 
   vector<Tensor> get_weights() const {
+    vector<Tensor> weights = {w_krnl};
     if (use_bias)
-      return {w_krnl, w_bias};
-    return {w_krnl};
+      weights.push_back(w_bias);
+    return move(weights);
   }
 };
 
+///////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 
 void model_configure_shape(auto &model) {
   puts("");
