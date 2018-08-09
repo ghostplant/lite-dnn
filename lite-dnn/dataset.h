@@ -1,5 +1,3 @@
-
-
 #include <dirent.h>
 #include <opencv2/core/core.hpp>
 #include <opencv2/highgui/highgui.hpp>
@@ -28,7 +26,7 @@ auto image_generator(string path, int height = 229, int width = 229, int cache_s
 
       dirent *ep, *ch_ep;
       DIR *root = opendir(path.c_str());
-      assert(root != nullptr);
+      die_if(root == nullptr, "Cannot open directory of path: %s.", path.c_str());
 
       while ((ep = readdir(root)) != nullptr) {
         if (!ep->d_name[1] || (ep->d_name[1] == '.' && !ep->d_name[2]))
@@ -57,7 +55,7 @@ auto image_generator(string path, int height = 229, int width = 229, int cache_s
       printf("Total %d samples found with %d classes.\n", samples, n_class);
 
       for (int i = 0; i < tids.size(); ++i)
-        assert(!pthread_create(&tids[i], NULL, Generator::start, this));
+        die_if(0 != pthread_create(&tids[i], NULL, Generator::start, this), "Failed to create intra-threads for data generation.");
     }
 
     ~Generator() {
@@ -215,7 +213,6 @@ auto array_generator(const char* images_ubyte, const char* labels_ubyte) {
     length = read_uint32(fp);
     header -= UBYTE_MAGIC;
 
-    assert(header >= 1 && header <= 4);
     if (header == 1) { // output_shape = (N, max(val) + 1),  max(val) <= 255
       vector<uint8_t> raw(length);
       assert(fread(raw.data(), 1, raw.size(), fp) == raw.size());
@@ -232,7 +229,7 @@ auto array_generator(const char* images_ubyte, const char* labels_ubyte) {
       return {move(shape), move(tensor)};
 
     } else if (header == 2) { // shape = (N, C),  may support max(val) > 255
-      assert(0); // unsupported
+      die_if(true, "Un supported dataset header format: %d\n", header);
 
     } else if (header == 3) { // shape = (N, 1, H, W)
       uint32_t h = read_uint32(fp);
@@ -265,14 +262,14 @@ auto array_generator(const char* images_ubyte, const char* labels_ubyte) {
       }
       return {move(shape), move(tensor)};
 
-    }
-    assert(0);
+    } else
+      die_if(true, "Un supported dataset header format: %d\n", header);
     return {{}, {}};
   };
 
   auto full_images = ReadNormalDataset(images_ubyte);
   auto full_labels = ReadNormalDataset(labels_ubyte);
-  assert(full_images.first[0] == full_labels.first[0]);
+  die_if(full_images.first[0] != full_labels.first[0], "The number of images and labels in total doesn't match.");
 
   auto gen = make_unique<Generator>();
 

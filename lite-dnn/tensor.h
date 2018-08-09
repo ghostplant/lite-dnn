@@ -8,6 +8,13 @@
 
 #define _EPSILON 1.0e-7f
 
+#ifdef assert
+#undef assert
+#endif
+
+#define die_if(__cond__, __desc__, ...) ({if (__cond__) { printf("  \033[33m[!] " __desc__ "\033[0m\n", ##__VA_ARGS__); fflush(stdout); exit(1);}})
+#define assert(__cond__)  die_if(!(__cond__), "Not satisfied condition at: file %s: line %d.", __FILE__, __LINE__)
+
 using namespace std;
 
 static unordered_map<size_t, vector<void*>> cached_mem;

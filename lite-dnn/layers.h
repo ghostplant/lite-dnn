@@ -14,20 +14,24 @@ public:
   virtual void learn(float lr) const = 0;
 
   virtual vector<Tensor> get_weights() const = 0;
+
+  virtual vector<int> configure(const vector<int> &input_shape) {
+    return input_shape;
+  }
 };
 
 
-class SoftmaxWithCrossEntropyLoss: public Layer {
+class SoftmaxCrossEntropy: public Layer {
 
 public:
-  SoftmaxWithCrossEntropyLoss() {
+  SoftmaxCrossEntropy() {
   }
 
-  ~SoftmaxWithCrossEntropyLoss() {
+  ~SoftmaxCrossEntropy() {
   }
 
   string to_string() const {
-    return "SoftmaxWithCrossEntropyLoss";
+    return "SoftmaxCrossEntropy";
   }
 
   Tensor forward(const Tensor &x) {
@@ -188,11 +192,16 @@ public:
     return "Pooling";
   }
 
+  vector<int> configure(const vector<int> &input_shape) {
+    die_if(input_shape.size() != 4, "Currently Pooling Layer only suport 4D tensor.");
+    return {input_shape[0], input_shape[1], (input_shape[2] - (size - stride)) / stride, (input_shape[3] - (size - stride)) / stride};
+  }
+
   Tensor forward(const Tensor &x) {
     assert(x.shape.size() == 4);
     // assert((x.shape[2] - (size - stride)) % stride == 0 && (x.shape[3] - (size - stride)) % stride == 0);
 
-    Tensor y({x.shape[0], x.shape[1], (x.shape[2] - (size - stride)) / stride, (x.shape[3] - (size - stride)) / stride});
+    Tensor y(this->configure(x.shape));
     float alpha = 1.0f, beta = 0.0f;
     assert(CUDNN_STATUS_SUCCESS == cudnnPoolingForward(cudnnHandle, poolDesc, &alpha, x.dataTensor->get(), (float*)x.d_data->get(), &beta, y.dataTensor->get(), (float*)y.d_data->get()));
     return move(y);
@@ -286,12 +295,19 @@ public:
   Flatten() {
   }
 
+  vector<int> configure(const vector<int> &input_shape) {
+    int count = 1;
+    for (int i = 1; i < input_shape.size(); ++i)
+      count *= input_shape[i];
+    return {input_shape[0], count};
+  }
+
   string to_string() const {
     return "Flatten";
   }
 
   Tensor forward(const Tensor &x) {
-    return x.reshape({x.shape[0], int(x.count() / x.shape[0])});
+    return x.reshape(this->configure(x.shape));
   }
 
   Tensor backward(const Tensor &dy, const Tensor &y, const Tensor &x, bool lastLayer = false) {
@@ -312,9 +328,17 @@ class Dense: public Layer {
 public:
   Tensor w, bias, ones, g_bias, g_w;
   int channels;
-  const char *kernel_init;
 
-  Dense(int channels, const char *kernel_init = NULL, int max_batch = 1024): channels(channels), kernel_init(kernel_init), ones({max_batch, 1}, 1.0f), bias({1, channels}, 0.0f), g_bias({1, channels}), w(), g_w() {
+  Dense(int channels, int max_batch = 1024): channels(channels), ones({max_batch, 1}, 1.0f), g_bias(), g_w(), w(), bias() {
+  }
+
+  vector<int> configure(const vector<int> &input_shape) {
+    if (w.count() < 1) {
+      assert(input_shape.size() == 2);
+      w = Tensor({input_shape[1], channels}, true);
+      bias = Tensor({1, channels}, 0.0f);
+    }
+    return {input_shape[0], channels};
   }
 
   string to_string() const {
@@ -323,12 +347,6 @@ public:
 
   Tensor forward(const Tensor &x) {
     assert(x.shape.size() == 2);
-    if (w.count() < 1) {
-      if (!kernel_init)
-        w = Tensor({x.shape[1], channels}, true);
-      else
-        w = Tensor({x.shape[1], channels}, (float)atof(kernel_init));
-    }
 
     auto out = x.matmul(w, false, false);
     // y = x * w + ones * bias';
@@ -387,10 +405,6 @@ public:
       filters(filters), kernel_size(kernel_size), stride(stride), padding(padding), convDesc(NULL), filterDesc(NULL), use_bias(use_bias) {
   }
 
-  string to_string() const {
-    return "Convolution";
-  }
-
   ~Convolution() {
     if (filterDesc)
       assert(CUDNN_STATUS_SUCCESS == cudnnDestroyFilterDescriptor(filterDesc));
@@ -398,32 +412,41 @@ public:
       assert(CUDNN_STATUS_SUCCESS == cudnnDestroyConvolutionDescriptor(convDesc));
   }
 
-  Tensor forward(const Tensor &x) {
-    assert(x.shape.size() == 4);
+  vector<int> configure(const vector<int> &input_shape) {
     if (w_krnl.count() < 1) {
-      w_krnl = Tensor({kernel_size, kernel_size, x.shape[1], filters}, true);
+      w_krnl = Tensor({kernel_size, kernel_size, input_shape[1], filters}, true);
       g_krnl = Tensor(w_krnl.shape);
       if (use_bias) {
         w_bias = Tensor({1, filters, 1, 1}, 0.0f);
         g_bias = Tensor(w_bias.shape);
       }
-
       cudnnCreateConvolutionDescriptor(&convDesc);
       cudnnSetConvolution2dDescriptor(convDesc, padding, padding, stride, stride, 1, 1, CUDNN_CROSS_CORRELATION, CUDNN_DATA_FLOAT);
       // assert(CUDNN_STATUS_SUCCESS == cudnnSetConvolutionMathType(convDesc, CUDNN_TENSOR_OP_MATH));
 
       cudnnCreateFilterDescriptor(&filterDesc);
       cudnnSetFilter4dDescriptor(filterDesc, CUDNN_DATA_FLOAT, CUDNN_TENSOR_NCHW,
-          filters, x.shape[1], kernel_size, kernel_size);
+          filters, input_shape[1], kernel_size, kernel_size);
     }
+    int nn = input_shape[0], cc = filters, hh = (input_shape[2] + padding + padding - max(0, kernel_size - stride)) / stride, ww = (input_shape[3] + padding + padding - max(0, kernel_size - stride)) / stride;
+    return {nn, cc, hh, ww};
+  }
+
+  string to_string() const {
+    return "Convolution";
+  }
+
+  Tensor forward(const Tensor &x) {
+    assert(x.shape.size() == 4);
 
     float alpha = 1.0f, beta = 0.0f;
-    int nn = x.shape[0], cc = filters, hh = (x.shape[2] + padding + padding - max(0, kernel_size - stride)) / stride, ww = (x.shape[3] + padding + padding - max(0, kernel_size - stride)) / stride;
-    int n, c, h, w;
-    assert(CUDNN_STATUS_SUCCESS == cudnnGetConvolution2dForwardOutputDim(convDesc, x.dataTensor->get(), filterDesc, &n, &c, &h, &w));
-    assert(nn == n && cc == c && hh == h && ww == w);
 
-    Tensor ans({n, c, h, w});
+    vector<int> output_shape = configure(x.shape), cu_shape(4);
+    assert(CUDNN_STATUS_SUCCESS == cudnnGetConvolution2dForwardOutputDim(convDesc, x.dataTensor->get(), filterDesc, \
+        &cu_shape[0], &cu_shape[1], &cu_shape[2], &cu_shape[3]));
+    assert(output_shape == cu_shape);
+
+    Tensor ans(output_shape);
 
     cudnnConvolutionFwdAlgo_t convalgo;
     assert(CUDNN_STATUS_SUCCESS == cudnnGetConvolutionForwardAlgorithm(cudnnHandle, x.dataTensor->get(), filterDesc, convDesc,
@@ -510,5 +533,52 @@ public:
     return {w_krnl};
   }
 };
+
+
+void model_configure_shape(auto &model, vector<int> input_shape) {
+  puts("");
+  for (int i = 0; i < model.size(); ++i) {
+    input_shape = model[i]->configure(input_shape);
+    printf("layer: %20s, output_shape = (", model[i]->to_string().c_str());
+    for (int j = 1; j < input_shape.size(); ++j)
+      printf("%d%s", input_shape[j], j + 1 < input_shape.size() ? ", ": ")\n");
+  }
+  puts("");
+}
+
+bool model_load_weights(auto &model, const char *weight_path) {
+  FILE *fp = fopen(weight_path, "rb");
+  if (fp == nullptr)
+    return false;
+
+  puts("  [@] Loading saved weights ..");
+  for (auto &layer: model) {
+    auto sym_weights = layer->get_weights();
+    for (auto &weight: sym_weights) {
+      vector<float> host(weight.count());
+      die_if(host.size() != fread(host.data(), sizeof(float), host.size(), fp), "The file `weights.lw` doesn't match current model.");
+      weight.set_data(host.data());
+    }
+  }
+  fclose(fp);
+  return true;
+}
+
+bool model_save_weights(auto &model, const char *weight_path) {
+  FILE *fp = fopen("weights.lw", "wb");
+  if (fp == nullptr)
+    return false;
+
+  puts("  [@] Saving saved weights ..");
+  for (auto &layer: model) {
+    auto sym_weights = layer->get_weights();
+    for (auto &weight: sym_weights) {
+      auto host = weight.get_data();
+      assert(host.size() == fwrite(host.data(), sizeof(float), host.size(), fp));
+    }
+  }
+  fclose(fp);
+  return true;
+}
 
 #endif
