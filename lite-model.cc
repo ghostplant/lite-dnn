@@ -30,8 +30,6 @@
 #include <layers.h>
 #include <dataset.h>
 
-#define die_if(__cond__, __desc__, ...) ({if (__cond__) { printf("  [@] \033[31m" __desc__ "\033[0m", ##__VA_ARGS__); fflush(stdout); exit(1);}})
-
 
 using namespace std;
 
@@ -45,7 +43,7 @@ vector<shared_ptr<Layer>> create_model(const char *model, int n_class) {
     layers.push_back(make_shared<Dense>(512));
     layers.push_back(make_shared<Activation>(CUDNN_ACTIVATION_RELU));
     layers.push_back(make_shared<Dense>(n_class));
-    layers.push_back(make_shared<SoftmaxWithCrossEntropyLoss>());
+    layers.push_back(make_shared<SoftmaxCrossEntropy>());
   } else if (!strcmp(model, "mnist_cnn")) {
     layers.push_back(make_shared<Convolution>(32, 3));
     layers.push_back(make_shared<Activation>(CUDNN_ACTIVATION_RELU));
@@ -58,7 +56,7 @@ vector<shared_ptr<Layer>> create_model(const char *model, int n_class) {
     layers.push_back(make_shared<Activation>(CUDNN_ACTIVATION_RELU));
     layers.push_back(make_shared<Dropout>(0.25));
     layers.push_back(make_shared<Dense>(n_class));
-    layers.push_back(make_shared<SoftmaxWithCrossEntropyLoss>());
+    layers.push_back(make_shared<SoftmaxCrossEntropy>());
   } else if (!strcmp(model, "cifar10_lenet")) {
     layers.push_back(make_shared<Convolution>(32, 5, true));
     layers.push_back(make_shared<Activation>(CUDNN_ACTIVATION_RELU));
@@ -72,7 +70,7 @@ vector<shared_ptr<Layer>> create_model(const char *model, int n_class) {
     layers.push_back(make_shared<Activation>(CUDNN_ACTIVATION_RELU));
     layers.push_back(make_shared<Dropout>(0.25));
     layers.push_back(make_shared<Dense>(n_class));
-    layers.push_back(make_shared<SoftmaxWithCrossEntropyLoss>());
+    layers.push_back(make_shared<SoftmaxCrossEntropy>());
   } else if (!strcmp(model, "cifar10_alexnet")) {
     layers.push_back(make_shared<Convolution>(64, 5, true));
     layers.push_back(make_shared<Activation>(CUDNN_ACTIVATION_RELU));
@@ -88,7 +86,7 @@ vector<shared_ptr<Layer>> create_model(const char *model, int n_class) {
     layers.push_back(make_shared<Dense>(192));
     layers.push_back(make_shared<Activation>(CUDNN_ACTIVATION_RELU));
     layers.push_back(make_shared<Dense>(n_class));
-    layers.push_back(make_shared<SoftmaxWithCrossEntropyLoss>());
+    layers.push_back(make_shared<SoftmaxCrossEntropy>());
   } else if (!strcmp(model, "cifar10_vgg16")) {
     // Block-1
     layers.push_back(make_shared<Convolution>(64, 3, 1, 1));
@@ -133,7 +131,7 @@ vector<shared_ptr<Layer>> create_model(const char *model, int n_class) {
     layers.push_back(make_shared<Dense>(4096));
     layers.push_back(make_shared<Activation>(CUDNN_ACTIVATION_RELU));
     layers.push_back(make_shared<Dense>(n_class));
-    layers.push_back(make_shared<SoftmaxWithCrossEntropyLoss>());
+    layers.push_back(make_shared<SoftmaxCrossEntropy>());
   } else {
     printf("No model of name %s found.\n", model);
     exit(1);
@@ -160,10 +158,12 @@ int main(int argc, char **argv) {
   // auto gen = image_generator("/docker/PetImages/Pics", 224, 224, 1024, 8);
   auto gen = array_generator(CIFAR10_IMAGES, CIFAR10_LABELS);
 
-  int batch_size = 128, steps = 60000;
-  // vector<int> shape = {batch_size, gen->channel, gen->height, gen->width};
-
   auto model = create_model(argc > 1 ? argv[1] : "mnist_cnn", gen->n_class);
+
+  model_configure_shape(model, {-1, gen->channel, gen->height, gen->width});
+  model_load_weights(model, "weights.lw");
+
+  int batch_size = 128, steps = 60000;
 
   vector<Tensor> input(model.size() + 1), dloss(model.size());
   static unsigned long lastClock = get_microseconds();
@@ -184,24 +184,6 @@ int main(int argc, char **argv) {
       dloss[i] = model[i]->backward(dloss[i + 1], input[i + 1], input[i], i == 0), model[i]->learn(lr);
     auto data_loss = dloss.back();
 
-    if (!k) {
-      {
-      FILE *fp = fopen("weights.lw", "rb");
-      if (fp != nullptr) {
-        puts("  [@] Loading saved weights ..");
-        for (auto &layer: model) {
-          auto sym_weights = layer->get_weights();
-          for (auto &weight: sym_weights) {
-            vector<float> host(weight.count());
-            die_if(host.size() != fread(host.data(), sizeof(float), host.size(), fp), "The file `weights.lw` doesn't match current model.");
-            weight.set_data(host.data());
-          }
-        }
-        fclose(fp);
-      }
-      }
-    }
-
     unsigned long currClock = get_microseconds();
     if (currClock >= lastClock + 1000000) {
       auto loss_acc = get_loss_and_accuracy(outs, labels);
@@ -210,17 +192,6 @@ int main(int argc, char **argv) {
     }
   }
 
-  { puts("  [@] Saving saved weights ..");
-
-  FILE *fp = fopen("weights.lw", "wb");
-  assert(fp != nullptr);
-  for (auto &layer: model) {
-    auto sym_weights = layer->get_weights();
-    for (auto &weight: sym_weights) {
-      auto host = weight.get_data();
-      assert(host.size() == fwrite(host.data(), sizeof(float), host.size(), fp));
-    }
-  }
-  fclose(fp); }
+  model_save_weights(model, "weights.lw");
   return 0;
 }
