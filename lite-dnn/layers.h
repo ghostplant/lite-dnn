@@ -21,6 +21,50 @@ public:
 };
 
 
+class InputLayer: public Layer {
+
+public:
+  vector<int> input_shape;
+
+  InputLayer(int channel, int height = -1, int width = -1): input_shape({-1, channel}) {
+    if (height > 0 && width > 0)
+      input_shape.push_back(height), input_shape.push_back(width);
+  }
+
+  ~InputLayer() {
+  }
+
+  vector<int> configure(const vector<int> &input_shape = {}) {
+    if (input_shape.size() >= 1)
+      this->input_shape[0] = input_shape[0];
+    return this->input_shape;
+  }
+
+  string to_string() const {
+    return "InputLayer";
+  }
+
+  Tensor forward(const Tensor &x) {
+    int batch = input_shape[0];
+    input_shape[0] = x.shape[0];
+    die_if(input_shape != x.shape, "The input image shape %s doesn't match the shape of input layer.", Tensor::stringify_shape(x.shape, 1).c_str());
+    input_shape[0] = batch;
+    return x;
+  }
+
+  Tensor backward(const Tensor &dy, const Tensor &y, const Tensor &x, bool lastLayer = false) {
+    return {};
+  }
+
+  void learn(float lr) const {
+  }
+
+  vector<Tensor> get_weights() const {
+    return {};
+  }
+};
+
+
 class SoftmaxCrossEntropy: public Layer {
 
 public:
@@ -535,13 +579,12 @@ public:
 };
 
 
-void model_configure_shape(auto &model, vector<int> input_shape) {
+void model_configure_shape(auto &model) {
   puts("");
+  vector<int> val_shape;
   for (int i = 0; i < model.size(); ++i) {
-    input_shape = model[i]->configure(input_shape);
-    printf("layer: %20s, output_shape = (", model[i]->to_string().c_str());
-    for (int j = 1; j < input_shape.size(); ++j)
-      printf("%d%s", input_shape[j], j + 1 < input_shape.size() ? ", ": ")\n");
+    val_shape = model[i]->configure(val_shape);
+    printf("layer: %20s, output_shape = %s\n", model[i]->to_string().c_str(), Tensor::stringify_shape(val_shape, 1).c_str());
   }
   puts("");
 }
