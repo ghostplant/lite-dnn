@@ -188,10 +188,21 @@ int main(int argc, char **argv) {
     auto &outs = input[input.size() - 1];
     outs = outs.clip_by_value(_EPSILON, 1.0f - _EPSILON);
 
-    dloss[model.size() - 1] = model.back()->backward(input.back(), labels, input.back());
-    for (int i = model.size() - 2; i >= 0; --i)
-      dloss[i] = model[i]->backward(dloss[i + 1], input[i + 1], input[i]), model[i]->learn(lr);
-    auto data_loss = dloss.back();
+    dloss[model.size() - 1] = model.back()->backward(labels);
+
+    vector<Tensor> symbolic_weights, symbolic_gradients;
+    for (int i = model.size() - 2; i >= 0; --i) {
+      dloss[i] = model[i]->backward(dloss[i + 1]);
+
+      for (auto &gradient: model[i]->get_gradients())
+        symbolic_gradients.push_back(gradient);
+      for (auto &weight: model[i]->get_weights())
+        symbolic_weights.push_back(weight);
+
+      die_if(symbolic_weights.size() != symbolic_gradients.size(), "weight quantity and gradient quantity don't match.");
+    }
+    for (int i = 0; i < symbolic_weights.size(); ++i)
+      symbolic_weights[i].self_add(symbolic_gradients[i], lr);
 
     unsigned long currClock = get_microseconds();
     if (currClock >= lastClock + 1000000) {

@@ -240,6 +240,12 @@ public:
     return ans;
   }
 
+  Tensor self_add(const Tensor &peer, float peerWeight = 1.0f) const {
+    assert(this->shape == peer.shape);
+    assert(CUBLAS_STATUS_SUCCESS == cublasSaxpy(cublasHandle, peer.count(), &peerWeight, (float*)peer.d_data->get(), 1, (float*)this->d_data->get(), 1));
+    return *this;
+  }
+
   Tensor add(const Tensor &that) const {
     assert(this->shape == that.shape);
     float alpha = 1.0f;
