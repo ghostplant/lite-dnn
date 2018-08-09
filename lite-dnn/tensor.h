@@ -12,7 +12,7 @@
 #undef assert
 #endif
 
-#define die_if(__cond__, __desc__, ...) ({if (__cond__) { printf("  \033[33m[!] " __desc__ "\033[0m\n", ##__VA_ARGS__); fflush(stdout); exit(1);}})
+#define die_if(__cond__, __desc__, ...) ({if (__cond__) { printf("  \033[33m[!] " __desc__ "\033[0m\n\n", ##__VA_ARGS__); fflush(stdout); exit(1);}})
 #define assert(__cond__)  die_if(!(__cond__), "Not satisfied condition at: file %s: line %d.", __FILE__, __LINE__)
 
 using namespace std;
@@ -99,6 +99,15 @@ public:
 
     if (randTime)
       srand(time(0));
+  }
+
+  static string stringify_shape(const vector<int> &shape, int offset = 0) {
+    string ans = "(";
+    if (offset == shape.size())
+      return ans + ")";
+    for (int i = offset; i < shape.size(); ++i)
+      ans += to_string(shape[i]) + ((i + 1 < shape.size()) ? ", " : ")");
+    return ans;
   }
 
 

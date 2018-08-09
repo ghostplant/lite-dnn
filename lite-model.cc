@@ -37,6 +37,7 @@ using namespace std;
 vector<shared_ptr<Layer>> create_model(const char *model, int n_class) {
   vector<shared_ptr<Layer>> layers;
   if (!strcmp(model, "mnist_mlp")) {
+    layers.push_back(make_shared<InputLayer>(1, 28, 28));
     layers.push_back(make_shared<Flatten>());
     layers.push_back(make_shared<Dense>(512));
     layers.push_back(make_shared<Activation>(CUDNN_ACTIVATION_RELU));
@@ -45,6 +46,7 @@ vector<shared_ptr<Layer>> create_model(const char *model, int n_class) {
     layers.push_back(make_shared<Dense>(n_class));
     layers.push_back(make_shared<SoftmaxCrossEntropy>());
   } else if (!strcmp(model, "mnist_cnn")) {
+    layers.push_back(make_shared<InputLayer>(1, 28, 28));
     layers.push_back(make_shared<Convolution>(32, 3));
     layers.push_back(make_shared<Activation>(CUDNN_ACTIVATION_RELU));
     layers.push_back(make_shared<Convolution>(64, 3));
@@ -58,6 +60,7 @@ vector<shared_ptr<Layer>> create_model(const char *model, int n_class) {
     layers.push_back(make_shared<Dense>(n_class));
     layers.push_back(make_shared<SoftmaxCrossEntropy>());
   } else if (!strcmp(model, "cifar10_lenet")) {
+    layers.push_back(make_shared<InputLayer>(3, 32, 32));
     layers.push_back(make_shared<Convolution>(32, 5, true));
     layers.push_back(make_shared<Activation>(CUDNN_ACTIVATION_RELU));
     layers.push_back(make_shared<Pooling>(2, 2, CUDNN_POOLING_MAX));
@@ -72,6 +75,7 @@ vector<shared_ptr<Layer>> create_model(const char *model, int n_class) {
     layers.push_back(make_shared<Dense>(n_class));
     layers.push_back(make_shared<SoftmaxCrossEntropy>());
   } else if (!strcmp(model, "cifar10_alexnet")) {
+    layers.push_back(make_shared<InputLayer>(3, 32, 32));
     layers.push_back(make_shared<Convolution>(64, 5, true));
     layers.push_back(make_shared<Activation>(CUDNN_ACTIVATION_RELU));
     layers.push_back(make_shared<Pooling>(3, 2, CUDNN_POOLING_MAX));
@@ -87,7 +91,8 @@ vector<shared_ptr<Layer>> create_model(const char *model, int n_class) {
     layers.push_back(make_shared<Activation>(CUDNN_ACTIVATION_RELU));
     layers.push_back(make_shared<Dense>(n_class));
     layers.push_back(make_shared<SoftmaxCrossEntropy>());
-  } else if (!strcmp(model, "cifar10_vgg16")) {
+  } else if (!strcmp(model, "imagenet_vgg16")) {
+    layers.push_back(make_shared<InputLayer>(3, 224, 224));
     // Block-1
     layers.push_back(make_shared<Convolution>(64, 3, 1, 1));
     layers.push_back(make_shared<Activation>(CUDNN_ACTIVATION_RELU));
@@ -101,7 +106,7 @@ vector<shared_ptr<Layer>> create_model(const char *model, int n_class) {
     layers.push_back(make_shared<Activation>(CUDNN_ACTIVATION_RELU));
     layers.push_back(make_shared<Pooling>(2, 2, CUDNN_POOLING_MAX));
     // Block-3
-    /*layers.push_back(make_shared<Convolution>(256, 3, 1, 1));
+    layers.push_back(make_shared<Convolution>(256, 3, 1, 1));
     layers.push_back(make_shared<Activation>(CUDNN_ACTIVATION_RELU));
     layers.push_back(make_shared<Convolution>(256, 3, 1, 1));
     layers.push_back(make_shared<Activation>(CUDNN_ACTIVATION_RELU));
@@ -123,7 +128,7 @@ vector<shared_ptr<Layer>> create_model(const char *model, int n_class) {
     layers.push_back(make_shared<Activation>(CUDNN_ACTIVATION_RELU));
     layers.push_back(make_shared<Convolution>(512, 3, 1, 1));
     layers.push_back(make_shared<Activation>(CUDNN_ACTIVATION_RELU));
-    layers.push_back(make_shared<Pooling>(2, 2, CUDNN_POOLING_MAX));*/
+    layers.push_back(make_shared<Pooling>(2, 2, CUDNN_POOLING_MAX));
     // Include top
     layers.push_back(make_shared<Flatten>());
     layers.push_back(make_shared<Dense>(4096));
@@ -158,14 +163,18 @@ int main(int argc, char **argv) {
   // auto gen = image_generator("/docker/PetImages/Pics", 224, 224, 1024, 8);
   auto gen = array_generator(CIFAR10_IMAGES, CIFAR10_LABELS);
 
-  auto model = create_model(argc > 1 ? argv[1] : "mnist_cnn", gen->n_class);
+  auto model = create_model(argc > 1 ? argv[1] : "cifar10_alexnet", gen->n_class);
+  const char *weight_path = "weights.lw";
 
-  model_configure_shape(model, {-1, gen->channel, gen->height, gen->width});
-  model_load_weights(model, "weights.lw");
+  // vector<int> input_shape = {-1, gen->channel, gen->height, gen->width};
+  model_configure_shape(model);
+  model_load_weights(model, weight_path);
 
   int batch_size = 128, steps = 60000;
 
   vector<Tensor> input(model.size() + 1), dloss(model.size());
+  // unordered_set<void*> compute_required;
+
   static unsigned long lastClock = get_microseconds();
 
   for (int k = 0, it = 0; k < steps; ++k) {
@@ -181,7 +190,7 @@ int main(int argc, char **argv) {
 
     dloss[model.size() - 1] = model.back()->backward(input.back(), labels, input.back());
     for (int i = model.size() - 2; i >= 0; --i)
-      dloss[i] = model[i]->backward(dloss[i + 1], input[i + 1], input[i], i == 0), model[i]->learn(lr);
+      dloss[i] = model[i]->backward(dloss[i + 1], input[i + 1], input[i]), model[i]->learn(lr);
     auto data_loss = dloss.back();
 
     unsigned long currClock = get_microseconds();
@@ -192,6 +201,6 @@ int main(int argc, char **argv) {
     }
   }
 
-  model_save_weights(model, "weights.lw");
+  model_save_weights(model, weight_path);
   return 0;
 }
