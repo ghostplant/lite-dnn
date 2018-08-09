@@ -552,11 +552,23 @@ bool model_load_weights(auto &model, const char *weight_path) {
     return false;
 
   puts("  [@] Loading saved weights ..");
+  ssize_t w_count = 0;
+  for (auto &layer: model) {
+    auto sym_weights = layer->get_weights();
+    for (auto &weight: sym_weights)
+      w_count += weight.count();
+  }
+  fseek(fp, 0, SEEK_END);
+  ssize_t f_bytes = ftell(fp);
+
+  die_if(f_bytes != w_count * sizeof(float), "The weight file `%s` doesn't match the current model.", weight_path);
+  fseek(fp, 0, SEEK_SET);
+
   for (auto &layer: model) {
     auto sym_weights = layer->get_weights();
     for (auto &weight: sym_weights) {
       vector<float> host(weight.count());
-      die_if(host.size() != fread(host.data(), sizeof(float), host.size(), fp), "The file `weights.lw` doesn't match current model.");
+      assert(host.size() == fread(host.data(), sizeof(float), host.size(), fp));
       weight.set_data(host.data());
     }
   }
