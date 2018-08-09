@@ -30,7 +30,6 @@
 #include <layers.h>
 #include <dataset.h>
 
-
 using namespace std;
 
 
@@ -172,7 +171,7 @@ int main(int argc, char **argv) {
 
   int batch_size = 128, steps = 60000;
 
-  vector<Tensor> input(model.size() + 1), dloss(model.size());
+  vector<Tensor> input(model.size() + 1), dloss(model.size() + 1);
   // unordered_set<void*> compute_required;
 
   static unsigned long lastClock = get_microseconds();
@@ -191,7 +190,9 @@ int main(int argc, char **argv) {
     dloss[model.size() - 1] = model.back()->backward(labels);
 
     vector<Tensor> symbolic_weights, symbolic_gradients;
-    for (int i = model.size() - 2; i >= 0; --i) {
+
+    dloss[model.size()] = labels;
+    for (int i = model.size() - 1; i >= 0; --i) {
       dloss[i] = model[i]->backward(dloss[i + 1]);
 
       for (auto &gradient: model[i]->get_gradients())
