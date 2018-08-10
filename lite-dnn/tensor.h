@@ -242,19 +242,26 @@ public:
     return ans;
   }
 
-  Tensor self_add(const Tensor &peer, float peerWeight = 1.0f) const {
-    assert(this->shape == peer.shape);
-    assert(CUBLAS_STATUS_SUCCESS == cublasSaxpy(cublasHandle, peer.count(), &peerWeight, (float*)peer.d_data->get(), 1, (float*)this->d_data->get(), 1));
+  Tensor self_update(const Tensor &that, float alpha = 1.0f, float beta = 0.0f) const {
+    assert(this->shape == that.shape);
+    assert(CUDNN_STATUS_SUCCESS == cudnnTransformTensor(cudnnHandle,
+        &alpha, that.dataTensor->get(), (float*)that.d_data->get(),
+        &beta, this->dataTensor->get(), (float*)this->d_data->get()));
     return *this;
   }
 
-  Tensor add(const Tensor &that) const {
+  Tensor self_add(const Tensor &that, float ceof = 1.0f) const {
     assert(this->shape == that.shape);
-    float alpha = 1.0f;
+    assert(CUBLAS_STATUS_SUCCESS == cublasSaxpy(cublasHandle, that.count(), &ceof, (float*)that.d_data->get(), 1, (float*)this->d_data->get(), 1));
+    return *this;
+  }
+
+  Tensor add(const Tensor &that, float ceof = 1.0f) const {
+    assert(this->shape == that.shape);
     Tensor ans(this->shape, 0.0f);
-    assert(CUBLAS_STATUS_SUCCESS == cublasSaxpy(cublasHandle, count(), &alpha, (float*)this->d_data->get(), 1, (float*)ans.d_data->get(), 1));
+    assert(CUBLAS_STATUS_SUCCESS == cublasSaxpy(cublasHandle, count(), &ceof, (float*)this->d_data->get(), 1, (float*)ans.d_data->get(), 1));
     // Tensor ans = this->copy();
-    assert(CUBLAS_STATUS_SUCCESS == cublasSaxpy(cublasHandle, count(), &alpha, (float*)that.d_data->get(), 1, (float*)ans.d_data->get(), 1));
+    assert(CUBLAS_STATUS_SUCCESS == cublasSaxpy(cublasHandle, count(), &ceof, (float*)that.d_data->get(), 1, (float*)ans.d_data->get(), 1));
     return ans;
   }
 
