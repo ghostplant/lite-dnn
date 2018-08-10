@@ -62,7 +62,8 @@ int main(int argc, char **argv) {
     ->then(make_shared<Dense>(512))
     ->then(make_shared<Activation>(CUDNN_ACTIVATION_RELU))
     ->then(make_shared<Dense>(gen->n_class))
-    ->then(make_shared<SoftmaxCrossEntropy>("labels_0"));*/
+    ->then(make_shared<SoftmaxCrossEntropy>("labels_0"))
+    ->summary();*/
 
   // Alexnet
   auto model = make_shared<InputLayer>("images_0", gen->channel, gen->height, gen->width)

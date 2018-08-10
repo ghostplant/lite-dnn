@@ -183,6 +183,39 @@ public:
 };
 
 
+class Concat: public Layer {
+
+public:
+  Concat(const auto &...a) {
+    this->parents = {a...};
+    die_if(this->parents.size() == 0, "Not allowed to have zero parent layer to add.");
+
+    vector<int> output_shape = this->parents[0]->get_output_shape();
+    for (int i = 1; i < this->parents.size(); ++i)
+      die_if(output_shape != this->parents[i]->get_output_shape(), "Output shape for each parent layer doesn't match with each other.");
+    this->input_shape = output_shape;
+  }
+
+  ~Concat() {
+  }
+
+  string to_string() const {
+    return "Concat";
+  }
+
+  Tensor forward(const vector<Tensor> &xs, const unordered_map<string, Tensor> &feed_dict) {
+    Tensor y = xs[0];
+    for (int i = 1; i < xs.size(); ++i)
+      y = y.add(xs[i]);
+    return y;
+  }
+
+  vector<Tensor> backward(const Tensor &dy, const unordered_map<string, Tensor> &feed_dict) {
+    return vector<Tensor>(parents.size(), dy);
+  }
+};
+
+
 class SoftmaxCrossEntropy: public Layer {
 
 public:

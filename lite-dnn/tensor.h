@@ -13,7 +13,7 @@
 #endif
 
 #define die_if(__cond__, __desc__, ...) ({if (__cond__) { printf("  \033[33m[!] " __desc__ "\033[0m\n\n", ##__VA_ARGS__); fflush(stdout); exit(1);}})
-#define assert(__cond__)  die_if(!(__cond__), "Not satisfied condition at: file %s: line %d.", __FILE__, __LINE__)
+#define assert(__cond__)  die_if(!(__cond__), "Assertion failed: file %s: line %d.", __FILE__, __LINE__)
 
 using namespace std;
 
