@@ -51,7 +51,7 @@ int main(int argc, char **argv) {
 
   const char *weight_path = "weights.lw";
   int batch_size = 128, steps = 60000;
-  // auto gen = image_generator("/docker/PetImages/Pics", 224, 224, 1024, 8);
+  // auto gen = image_generator("/docker/PetImages/Pics", 32, 32, 1024, 8);
   auto gen = array_generator(CIFAR10_IMAGES, CIFAR10_LABELS);
 
   // MLP
@@ -86,6 +86,11 @@ int main(int argc, char **argv) {
 
   model->load_weights_from_file(weight_path);
 
+  auto symbolic_weights = model->collect_all_weights();
+  vector<Tensor> symbolic_velocity(symbolic_weights.size());
+  for (int i = 0; i < symbolic_weights.size(); ++i)
+    symbolic_velocity[i] = Tensor(symbolic_weights[i].shape, 0.0f);
+
   unsigned long lastClock = get_microseconds();
   for (int k = 0, it = 0; k < steps; ++k) {
 
@@ -94,13 +99,21 @@ int main(int argc, char **argv) {
 
     auto predicts = model->predict(feed_dict);
 
-    auto symbolic_weights = model->collect_all_weights();
     auto symbolic_gradients = model->collect_all_gradients(feed_dict);
     die_if(symbolic_weights.size() != symbolic_gradients.size(), "The quantity of weight and gradient doesn't match.");
 
+    /* SGD
     float lr = -float(0.05f * pow((1.0f + 0.0001f * k), -0.75f));
     for (int i = 0; i < symbolic_weights.size(); ++i)
       symbolic_weights[i].self_add(symbolic_gradients[i], lr);
+    */
+
+    // Momentum
+    float momentum = 0.9f, lr = 0.01;
+    for (int i = 0; i < symbolic_weights.size(); ++i) {
+      symbolic_velocity[i].self_update(symbolic_gradients[i], lr, momentum);
+      symbolic_weights[i].self_add(symbolic_velocity[i], -1.0f);
+    }
 
     unsigned long currClock = get_microseconds();
     if (currClock >= lastClock + 1000000) {
