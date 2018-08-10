@@ -195,12 +195,13 @@ int main(int argc, char **argv) {
     for (int i = model.size() - 1; i >= 0; --i) {
       dloss[i] = model[i]->backward(dloss[i + 1]);
 
-      for (auto &gradient: model[i]->get_gradients())
+      for (auto &gradient: model[i]->get_gradients(dloss[i + 1]))
         symbolic_gradients.push_back(gradient);
+
       for (auto &weight: model[i]->get_weights())
         symbolic_weights.push_back(weight);
 
-      die_if(symbolic_weights.size() != symbolic_gradients.size(), "weight quantity and gradient quantity don't match.");
+      die_if(symbolic_weights.size() != symbolic_gradients.size(), "The quantities of weight and gradient don't match.");
     }
     for (int i = 0; i < symbolic_weights.size(); ++i)
       symbolic_weights[i].self_add(symbolic_gradients[i], lr);

@@ -9,20 +9,27 @@ public:
 
   virtual Tensor forward(const Tensor &x) = 0;
 
-  virtual Tensor backward(const Tensor &dy, bool lastLayer = false) = 0;
+  virtual Tensor backward(const Tensor &dy) = 0;
 
 
   virtual vector<Tensor> get_weights() const {
     return {};
   }
 
-  virtual vector<Tensor> get_gradients() const {
+  virtual vector<Tensor> get_gradients(const Tensor &dy) const {
     return {};
   }
 
   virtual vector<int> configure(const vector<int> &input_shape) {
     return input_shape;
   }
+
+  /*
+  vector<shared_ptr<Layer>> parents;
+  template <typename... Arguments> void from(Arguments... args) {
+    this->parents = {std::forward<Arguments>(args)...};
+  }
+  */
 
 protected:
   vector<Tensor> cacheTensors;
@@ -60,7 +67,7 @@ public:
     return x;
   }
 
-  Tensor backward(const Tensor &dy, bool lastLayer = false) {
+  Tensor backward(const Tensor &dy) {
     return {};
   }
 };
@@ -90,8 +97,8 @@ public:
     return y;
   }
 
-  Tensor backward(const Tensor &dy, bool lastLayer = false) {
-    Tensor &y = cacheTensors[0];
+  Tensor backward(const Tensor &dy) {
+    const Tensor &y = cacheTensors[0];
     assert(dy.shape == y.shape);
 
     float posi = 1.0f / dy.shape[0], nega = -1.0f / dy.shape[0];
@@ -131,10 +138,8 @@ public:
     return move(y);
   }
 
-  Tensor backward(const Tensor &dy, bool lastLayer = false) {
-    if (lastLayer)
-      return dy;
-    Tensor &x = cacheTensors[0], &y = cacheTensors[1];
+  Tensor backward(const Tensor &dy) {
+    const Tensor &x = cacheTensors[0], &y = cacheTensors[1];
 
     Tensor dx = dy;
     float alpha = 1.0f, beta = 0.0f;
@@ -178,12 +183,10 @@ public:
     return move(y);
   }
 
-  Tensor backward(const Tensor &dy, bool lastLayer = false) {
-    Tensor &x = cacheTensors[0], &y = cacheTensors[1];
+  Tensor backward(const Tensor &dy) {
+    const Tensor &x = cacheTensors[0], &y = cacheTensors[1];
 
     Tensor dx(x.shape);
-    if (lastLayer)
-      return dx;
     float alpha = 1.0f, beta = 0.0f;
     assert(CUDNN_STATUS_SUCCESS == cudnnLRNCrossChannelBackward(cudnnHandle, lrnDesc, CUDNN_LRN_CROSS_CHANNEL_DIM1,
         &alpha, y.dataTensor->get(), (float*)y.d_data->get(), dy.dataTensor->get(), (float*)dy.d_data->get(),
@@ -229,10 +232,8 @@ public:
     return move(y);
   }
 
-  Tensor backward(const Tensor &dy, bool lastLayer = false) {
-    if (lastLayer)
-      return dy;
-    Tensor &x = cacheTensors[0], &y = cacheTensors[1];
+  Tensor backward(const Tensor &dy) {
+    const Tensor &x = cacheTensors[0], &y = cacheTensors[1];
 
     Tensor dx(x.shape);
     float alpha = 1.0f, beta = 0.0f;
@@ -283,16 +284,14 @@ public:
     return move(y);
   }
 
-  Tensor backward(const Tensor &dy, bool lastLayer = false) {
-    Tensor &x = cacheTensors[0], &y = cacheTensors[1];
+  Tensor backward(const Tensor &dy) {
+    const Tensor &x = cacheTensors[0], &y = cacheTensors[1];
     assert(CUDNN_STATUS_SUCCESS == cudnnRestoreDropoutDescriptor(dropDesc, cudnnHandle, drop_prob, states->get(), states_size, seed));
 
     size_t _reversed_size;
     assert(CUDNN_STATUS_SUCCESS == cudnnDropoutGetReserveSpaceSize(y.dataTensor->get(), &_reversed_size));
     assert(_reversed_size <= reversed_size);
 
-    if (lastLayer)
-      return dy;
     Tensor dx(x.shape);
     assert(CUDNN_STATUS_SUCCESS == cudnnDropoutBackward(cudnnHandle, dropDesc, dy.dataTensor->get(), (float*)dy.d_data->get(),
       dx.dataTensor->get(), (float*)dx.d_data->get(), reversed->get(), reversed_size));
@@ -323,8 +322,8 @@ public:
     return x.reshape(this->configure(x.shape));
   }
 
-  Tensor backward(const Tensor &dy, bool lastLayer = false) {
-    Tensor &x = cacheTensors[0];
+  Tensor backward(const Tensor &dy) {
+    const Tensor &x = cacheTensors[0];
     return dy.reshape(x.shape);
   }
 };
@@ -333,10 +332,10 @@ public:
 class Dense: public Layer {
 
 public:
-  Tensor w, bias, ones, g_bias, g_w;
+  Tensor w, bias, ones;
   int channels;
 
-  Dense(int channels, int max_batch = 1024): channels(channels), ones({max_batch, 1}, 1.0f), g_bias(), g_w(), w(), bias() {
+  Dense(int channels, int max_batch = 1024): channels(channels), ones({max_batch, 1}, 1.0f), w(), bias() {
   }
 
   vector<int> configure(const vector<int> &input_shape) {
@@ -374,20 +373,19 @@ public:
     return move(y);
   }
 
-  Tensor backward(const Tensor &dy, bool lastLayer = false) {
-    Tensor &x = cacheTensors[0], &y = cacheTensors[1];
+  Tensor backward(const Tensor &dy) {
+    const Tensor &x = cacheTensors[0], &y = cacheTensors[1];
     assert(dy.shape == y.shape);
-    // dw = x' * dy
-    g_w = x.matmul(dy, true, false);
-    g_bias = ones.reshape({x.shape[0], 1}, true).matmul(dy, true, false);
-    if (lastLayer)
-      return dy;
     // dx = dy * w'
     return dy.matmul(w, false, true);
   }
 
-  vector<Tensor> get_gradients() const {
-    return { g_w, g_bias };
+  vector<Tensor> get_gradients(const Tensor &dy) const {
+    const Tensor &x = cacheTensors[0];
+    return {
+      x.matmul(dy, true, false),  // dw = x' * dy
+      ones.reshape({x.shape[0], 1}, true).matmul(dy, true, false)  // db = sum(dy, axis=0)
+    };
   }
 
   vector<Tensor> get_weights() const {
@@ -406,7 +404,7 @@ public:
   cudnnConvolutionDescriptor_t convDesc;
   cudnnFilterDescriptor_t filterDesc;
 
-  Convolution(int filters, int kernel_size, int stride = 1, int padding = 0, bool use_bias = false): w_krnl(), w_bias(), g_krnl(), g_bias(),
+  Convolution(int filters, int kernel_size, int stride = 1, int padding = 0, bool use_bias = false):
       filters(filters), kernel_size(kernel_size), stride(stride), padding(padding), convDesc(NULL), filterDesc(NULL), use_bias(use_bias) {
   }
 
@@ -420,10 +418,8 @@ public:
   vector<int> configure(const vector<int> &input_shape) {
     if (w_krnl.count() < 1) {
       w_krnl = Tensor({kernel_size, kernel_size, input_shape[1], filters}, true);
-      g_krnl = Tensor(w_krnl.shape);
       if (use_bias) {
         w_bias = Tensor({1, filters, 1, 1}, 0.0f);
-        g_bias = Tensor(w_bias.shape);
       }
       cudnnCreateConvolutionDescriptor(&convDesc);
       cudnnSetConvolution2dDescriptor(convDesc, padding, padding, stride, stride, 1, 1, CUDNN_CROSS_CORRELATION, CUDNN_DATA_FLOAT);
@@ -472,62 +468,65 @@ public:
     return move(y);
   }
 
-  Tensor backward(const Tensor &dy, bool lastLayer = false) {
-    Tensor &x = cacheTensors[0], &y = cacheTensors[1];
+  Tensor backward(const Tensor &dy) {
+    const Tensor &x = cacheTensors[0], &y = cacheTensors[1];
     float alpha = 1.0f, beta = 0.0f;
     assert(y.shape[1] == filters);
     int n = x.shape[0], c = x.shape[1], h = x.shape[2], w = x.shape[3];
 
     cudnnConvolutionBwdDataAlgo_t dalgo;
-    cudnnConvolutionBwdFilterAlgo_t falgo;
-    assert(CUDNN_STATUS_SUCCESS == cudnnGetConvolutionBackwardFilterAlgorithm(
-                cudnnHandle, x.dataTensor->get(), y.dataTensor->get(), convDesc, filterDesc,
-                CUDNN_CONVOLUTION_BWD_FILTER_PREFER_FASTEST, 0, &falgo));
     assert(CUDNN_STATUS_SUCCESS == cudnnGetConvolutionBackwardDataAlgorithm(
                 cudnnHandle, filterDesc, y.dataTensor->get(), convDesc, x.dataTensor->get(),
                 CUDNN_CONVOLUTION_BWD_DATA_PREFER_FASTEST, 0, &dalgo));
 
-    size_t maxSizeInBytes = 0, sizeInBytes;
-
-    assert(CUDNN_STATUS_SUCCESS == cudnnGetConvolutionBackwardFilterWorkspaceSize(
-                cudnnHandle, x.dataTensor->get(), y.dataTensor->get(), convDesc, filterDesc, 
-                falgo, &sizeInBytes));
-    maxSizeInBytes = max(maxSizeInBytes, sizeInBytes);
+    size_t sizeInBytes;
     assert(CUDNN_STATUS_SUCCESS == cudnnGetConvolutionBackwardDataWorkspaceSize(
                 cudnnHandle, filterDesc, y.dataTensor->get(), convDesc, x.dataTensor->get(), 
                 dalgo, &sizeInBytes));
-    maxSizeInBytes = max(maxSizeInBytes, sizeInBytes);
 
-    DeviceMemory workspace(maxSizeInBytes);
-
-    assert(CUDNN_STATUS_SUCCESS == cudnnConvolutionBackwardFilter(cudnnHandle, &alpha,
-                x.dataTensor->get(), (float*)x.d_data->get(),
-                dy.dataTensor->get(), (float*)dy.d_data->get(),
-                convDesc, falgo, workspace.get(), maxSizeInBytes, &beta,
-                filterDesc, (float*)g_krnl.d_data->get()));
-
-    if (use_bias) {
-        assert(CUDNN_STATUS_SUCCESS == cudnnConvolutionBackwardBias(cudnnHandle, &alpha,
-                dy.dataTensor->get(), (float*)dy.d_data->get(), &beta,
-                g_bias.dataTensor->get(), (float*)g_bias.d_data->get()));
-    }
-
-    if (lastLayer)
-      return dy;
+    DeviceMemory workspace(sizeInBytes);
 
     Tensor dx({n, c, h, w});
     assert(CUDNN_STATUS_SUCCESS == cudnnConvolutionBackwardData(cudnnHandle, &alpha,
                 filterDesc, (float*)w_krnl.d_data->get(),
                 dy.dataTensor->get(), (float*)dy.d_data->get(),
-                convDesc, dalgo, workspace.get(), maxSizeInBytes, &beta,
+                convDesc, dalgo, workspace.get(), sizeInBytes, &beta,
                 dx.dataTensor->get(), (float*)dx.d_data->get()));
     return move(dx);
   }
 
-  vector<Tensor> get_gradients() const {
-    vector<Tensor> grads = {g_krnl};
-    if (use_bias)
-      grads.push_back(g_bias);
+  vector<Tensor> get_gradients(const Tensor &dy) const {
+    const Tensor &x = cacheTensors[0], &y = cacheTensors[1];
+
+    vector<Tensor> grads = { Tensor(w_krnl.shape) };
+
+    cudnnConvolutionBwdFilterAlgo_t falgo;
+    assert(CUDNN_STATUS_SUCCESS == cudnnGetConvolutionBackwardFilterAlgorithm(
+                cudnnHandle, x.dataTensor->get(), y.dataTensor->get(), convDesc, filterDesc,
+                CUDNN_CONVOLUTION_BWD_FILTER_PREFER_FASTEST, 0, &falgo));
+
+    size_t sizeInBytes;
+    assert(CUDNN_STATUS_SUCCESS == cudnnGetConvolutionBackwardFilterWorkspaceSize(
+                cudnnHandle, x.dataTensor->get(), y.dataTensor->get(), convDesc, filterDesc, 
+                falgo, &sizeInBytes));
+
+    DeviceMemory workspace(sizeInBytes);
+
+    float alpha = 1.0f, beta = 0.0f;
+    assert(CUDNN_STATUS_SUCCESS == cudnnConvolutionBackwardFilter(cudnnHandle, &alpha,
+                x.dataTensor->get(), (float*)x.d_data->get(),
+                dy.dataTensor->get(), (float*)dy.d_data->get(),
+                convDesc, falgo, workspace.get(), sizeInBytes, &beta,
+                filterDesc, (float*)grads[0].d_data->get()));
+
+
+    if (use_bias) {
+      grads.push_back(Tensor(w_bias.shape));
+
+      assert(CUDNN_STATUS_SUCCESS == cudnnConvolutionBackwardBias(cudnnHandle, &alpha,
+             dy.dataTensor->get(), (float*)dy.d_data->get(), &beta,
+             grads[1].dataTensor->get(), (float*)grads[1].d_data->get()));
+    }
     return move(grads);
   }
 
