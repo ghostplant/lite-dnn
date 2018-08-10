@@ -185,8 +185,10 @@ public:
   vector<float> get_data() const {
     size_t len = count();
     vector<float> host(len);
-    assert(CUDA_SUCCESS == cuMemcpyDtoHAsync_v2(host.data(), (CUdeviceptr)d_data->get(), len * sizeof(float), hStream));
-    assert(CUDA_SUCCESS == cuStreamSynchronize(hStream));
+    if (len > 0) {
+      assert(CUDA_SUCCESS == cuMemcpyDtoHAsync_v2(host.data(), (CUdeviceptr)d_data->get(), len * sizeof(float), hStream));
+      assert(CUDA_SUCCESS == cuStreamSynchronize(hStream));
+    }
     return move(host);
   }
 
