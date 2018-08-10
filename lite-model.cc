@@ -174,7 +174,7 @@ int main(int argc, char **argv) {
     ->then(make_shared<Dense>(gen->n_class))
     ->then(make_shared<SoftmaxCrossEntropy>());*/
 
-  auto model = make_shared<InputLayer>("input_0", gen->channel, gen->height, gen->width)
+  auto model = make_shared<InputLayer>("images_0", gen->channel, gen->height, gen->width)
     ->then(make_shared<Convolution>(64, 5, true))
     ->then(make_shared<Activation>(CUDNN_ACTIVATION_RELU))
     ->then(make_shared<Pooling>(3, 2, CUDNN_POOLING_MAX))
@@ -200,7 +200,7 @@ int main(int argc, char **argv) {
     float lr = -float(0.05f * pow((1.0f + 0.0001f * k), -0.75f));
     auto batch = gen->next_batch(batch_size);
 
-    auto predicts = model->predict_on_batch({{"input_0", batch.images}});
+    auto predicts = model->predict_on_batch({{"images_0", batch.images}});
 
     auto symbolic_weights = model->compute_all_weights();
     auto symbolic_gradients = model->compute_all_gradients(batch.labels);

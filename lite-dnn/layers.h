@@ -7,9 +7,9 @@ class Layer: public std::enable_shared_from_this<Layer> {
 public:
   virtual string to_string() const = 0;
 
-  virtual Tensor forward(const Tensor &x, const unordered_map<string, Tensor> &feed_dict) = 0;
+  virtual Tensor forward(const vector<Tensor> &x, const unordered_map<string, Tensor> &feed_dict) = 0;
 
-  virtual Tensor backward(const Tensor &dy) = 0;
+  virtual vector<Tensor> backward(const Tensor &dy, const unordered_map<string, Tensor> &feed_dict) = 0;
 
 
   virtual vector<Tensor> get_weights() const {
@@ -30,16 +30,15 @@ public:
     vector<Tensor> xs;
     for (auto it: parents)
       xs.push_back(it->predict_on_batch(feed_dict));
-    if (!xs.size())
-      xs.push_back(feed_dict.begin()->second);
-    return this->forward(xs[0], feed_dict);
+    return this->forward(xs, feed_dict);
   }
 
   vector<Tensor> compute_all_gradients(const Tensor &dy) {
-    auto dx = this->backward(dy);
+    auto dxs = this->backward(dy, {});
     vector<Tensor> grads;
-    for (auto it: parents) {
-      auto prev = it->compute_all_gradients(dx);
+    die_if(dxs.size() != parents.size(), "the size of loss vector doesn't match the number of parent nodes.");
+    for (int i = 0; i < parents.size(); ++i) {
+      auto prev = parents[i]->compute_all_gradients(dxs[i]);
       grads.insert(grads.end(), prev.begin(), prev.end());
     }
     auto curr = this->get_gradients(dy);
@@ -70,7 +69,8 @@ public:
 
     for (int i = 0; i < this->parents.size(); ++i)
       this->parents[i]->summary(false);
-    printf(" => layer: %20s, output_shape: %s\n", this->to_string().c_str(), Tensor::stringify_shape(this->get_output_shape(), 1).c_str());
+    printf(" => layer: %20s, output_shape: %s\n", this->to_string().c_str(),
+        Tensor::stringify_shape(this->get_output_shape(), 1).c_str());
 
     if (top) putchar('\n');
     return shared_from_this();
@@ -106,7 +106,7 @@ public:
         succ = false;
 
       fclose(fp);
-      puts(succ ? "YES." : "NO.");
+      puts(succ ? "YES.\n" : "NO.\n");
     }
     return succ;
   }
@@ -135,7 +135,7 @@ public:
 
     if (weight_path != nullptr) {
       fclose(fp);
-      puts(succ ? "YES." : "NO.");
+      puts(succ ? "YES.\n" : "NO.\n");
     }
     return succ;
   }
@@ -166,17 +166,18 @@ public:
     return "InputLayer";
   }
 
-  Tensor forward(const Tensor &x, const unordered_map<string, Tensor> &feed_dict) {
+  Tensor forward(const vector<Tensor> &xs, const unordered_map<string, Tensor> &feed_dict) {
     auto it = feed_dict.find(place_holder);
     die_if(it == feed_dict.end(), "Cannot find item `%s` in feed_dict.", place_holder.c_str());
 
     auto x_shape = it->second.shape;
     x_shape[0] = -1;
-    die_if(input_shape != x_shape, "The shape of image fed doesn't match the expected shape of input layer: %s.", Tensor::stringify_shape(x_shape, 1).c_str());
+    die_if(input_shape != x_shape, "The shape of image fed doesn't match the expected shape of input layer: %s.",
+        Tensor::stringify_shape(x_shape, 1).c_str());
     return it->second;
   }
 
-  Tensor backward(const Tensor &dy) {
+  vector<Tensor> backward(const Tensor &dy, const unordered_map<string, Tensor> &feed_dict) {
     return {};
   }
 };
@@ -195,18 +196,18 @@ public:
     return "SoftmaxCrossEntropy";
   }
 
-  Tensor forward(const Tensor &x, const unordered_map<string, Tensor> &feed_dict) {
+  Tensor forward(const vector<Tensor> &xs, const unordered_map<string, Tensor> &feed_dict) {
     float alpha = 1.0f, beta = 0.0f;
 
-    Tensor y(x.shape);
+    Tensor y(xs[0].shape);
     assert(CUDNN_STATUS_SUCCESS == cudnnSoftmaxForward(cudnnHandle, CUDNN_SOFTMAX_ACCURATE, CUDNN_SOFTMAX_MODE_INSTANCE,
-        &alpha, x.dataTensor->get(), (float*)x.d_data->get(), &beta, y.dataTensor->get(), (float*)y.d_data->get()));
+        &alpha, xs[0].dataTensor->get(), (float*)xs[0].d_data->get(), &beta, y.dataTensor->get(), (float*)y.d_data->get()));
     y = y.clip_by_value(_EPSILON, 1.0f - _EPSILON);
     cacheTensors = {y};
     return y;
   }
 
-  Tensor backward(const Tensor &dy) {
+  vector<Tensor> backward(const Tensor &dy, const unordered_map<string, Tensor> &feed_dict) {
     const Tensor &y = cacheTensors[0];
     assert(dy.shape == y.shape);
 
@@ -216,7 +217,7 @@ public:
     Tensor dx(dy.shape, 0.0f);
     cublasSaxpy(cublasHandle, len, &posi, (float*)y.d_data->get(), 1, (float*)dx.d_data->get(), 1);
     cublasSaxpy(cublasHandle, len, &nega, (float*)dy.d_data->get(), 1, (float*)dx.d_data->get(), 1);
-    return move(dx);
+    return { move(dx) };
   }
 };
 
@@ -238,23 +239,25 @@ public:
     return "Activation";
   }
 
-  Tensor forward(const Tensor &x, const unordered_map<string, Tensor> &feed_dict) {
-    Tensor y(x.shape);
+  Tensor forward(const vector<Tensor> &xs, const unordered_map<string, Tensor> &feed_dict) {
+    Tensor y(xs[0].shape);
     float alpha = 1.0f, beta = 0.0f;
-    assert(CUDNN_STATUS_SUCCESS == cudnnActivationForward(cudnnHandle, activationDesc, &alpha, x.dataTensor->get(), (float*)x.d_data->get(), &beta, y.dataTensor->get(), (float*)y.d_data->get()));
+    assert(CUDNN_STATUS_SUCCESS == cudnnActivationForward(cudnnHandle, activationDesc, \
+        &alpha, xs[0].dataTensor->get(), (float*)xs[0].d_data->get(), &beta, y.dataTensor->get(), (float*)y.d_data->get()));
 
-    cacheTensors = {x, y};
+    cacheTensors = {xs[0], y};
     return move(y);
   }
 
-  Tensor backward(const Tensor &dy) {
+  vector<Tensor> backward(const Tensor &dy, const unordered_map<string, Tensor> &feed_dict) {
     const Tensor &x = cacheTensors[0], &y = cacheTensors[1];
 
     Tensor dx = dy;
     float alpha = 1.0f, beta = 0.0f;
-    assert(CUDNN_STATUS_SUCCESS == cudnnActivationBackward(cudnnHandle, activationDesc, &alpha, y.dataTensor->get(), (float*)y.d_data->get(),
-        dy.dataTensor->get(), (float*)dy.d_data->get(), x.dataTensor->get(), (float*)x.d_data->get(), &beta, dx.dataTensor->get(), (float*)dx.d_data->get()));
-    return move(dx);
+    assert(CUDNN_STATUS_SUCCESS == cudnnActivationBackward(cudnnHandle, activationDesc,
+        &alpha, y.dataTensor->get(), (float*)y.d_data->get(), dy.dataTensor->get(), (float*)dy.d_data->get(),
+        x.dataTensor->get(), (float*)x.d_data->get(), &beta, dx.dataTensor->get(), (float*)dx.d_data->get()));
+    return { move(dx) };
   }
 };
 
@@ -280,19 +283,19 @@ public:
     return "LRN";
   }
 
-  Tensor forward(const Tensor &x, const unordered_map<string, Tensor> &feed_dict) {
-    assert(x.shape.size() == 4);
+  Tensor forward(const vector<Tensor> &xs, const unordered_map<string, Tensor> &feed_dict) {
+    assert(xs[0].shape.size() == 4);
 
-    Tensor y(x.shape);
+    Tensor y(xs[0].shape);
     float alpha = 1.0f, beta = 0.0f;
     assert(CUDNN_STATUS_SUCCESS == cudnnLRNCrossChannelForward(cudnnHandle, lrnDesc, CUDNN_LRN_CROSS_CHANNEL_DIM1,
-        &alpha, x.dataTensor->get(), (float*)x.d_data->get(), &beta, y.dataTensor->get(), (float*)y.d_data->get()));
+        &alpha, xs[0].dataTensor->get(), (float*)xs[0].d_data->get(), &beta, y.dataTensor->get(), (float*)y.d_data->get()));
 
-    cacheTensors = {x, y};
+    cacheTensors = {xs[0], y};
     return move(y);
   }
 
-  Tensor backward(const Tensor &dy) {
+  vector<Tensor> backward(const Tensor &dy, const unordered_map<string, Tensor> &feed_dict) {
     const Tensor &x = cacheTensors[0], &y = cacheTensors[1];
 
     Tensor dx(x.shape);
@@ -300,7 +303,7 @@ public:
     assert(CUDNN_STATUS_SUCCESS == cudnnLRNCrossChannelBackward(cudnnHandle, lrnDesc, CUDNN_LRN_CROSS_CHANNEL_DIM1,
         &alpha, y.dataTensor->get(), (float*)y.d_data->get(), dy.dataTensor->get(), (float*)dy.d_data->get(),
         x.dataTensor->get(), (float*)x.d_data->get(), &beta, dx.dataTensor->get(), (float*)dx.d_data->get()));
-    return move(dx);
+    return { move(dx) };
   }
 };
 
@@ -329,25 +332,27 @@ public:
     return {input_shape[0], input_shape[1], (input_shape[2] - (size - stride)) / stride, (input_shape[3] - (size - stride)) / stride};
   }
 
-  Tensor forward(const Tensor &x, const unordered_map<string, Tensor> &feed_dict) {
+  Tensor forward(const vector<Tensor> &xs, const unordered_map<string, Tensor> &feed_dict) {
     auto shape = this->get_output_shape();
-    shape[0] = x.shape[0];
+    shape[0] = xs[0].shape[0];
     Tensor y(shape);
     float alpha = 1.0f, beta = 0.0f;
-    assert(CUDNN_STATUS_SUCCESS == cudnnPoolingForward(cudnnHandle, poolDesc, &alpha, x.dataTensor->get(), (float*)x.d_data->get(), &beta, y.dataTensor->get(), (float*)y.d_data->get()));
+    assert(CUDNN_STATUS_SUCCESS == cudnnPoolingForward(cudnnHandle, poolDesc,
+        &alpha, xs[0].dataTensor->get(), (float*)xs[0].d_data->get(), &beta, y.dataTensor->get(), (float*)y.d_data->get()));
 
-    cacheTensors = {x, y};
+    cacheTensors = {xs[0], y};
     return move(y);
   }
 
-  Tensor backward(const Tensor &dy) {
+  vector<Tensor> backward(const Tensor &dy, const unordered_map<string, Tensor> &feed_dict) {
     const Tensor &x = cacheTensors[0], &y = cacheTensors[1];
 
     Tensor dx(x.shape);
     float alpha = 1.0f, beta = 0.0f;
-    assert(CUDNN_STATUS_SUCCESS == cudnnPoolingBackward(cudnnHandle, poolDesc, &alpha, y.dataTensor->get(), (float*)y.d_data->get(), dy.dataTensor->get(), (float*)dy.d_data->get(),
-                         x.dataTensor->get(), (float*)x.d_data->get(), &beta, dx.dataTensor->get(), (float*)dx.d_data->get()));
-    return move(dx);
+    assert(CUDNN_STATUS_SUCCESS == cudnnPoolingBackward(cudnnHandle, poolDesc,
+        &alpha, y.dataTensor->get(), (float*)y.d_data->get(), dy.dataTensor->get(), (float*)dy.d_data->get(),
+        x.dataTensor->get(), (float*)x.d_data->get(), &beta, dx.dataTensor->get(), (float*)dx.d_data->get()));
+    return { move(dx) };
   }
 };
 
@@ -376,23 +381,23 @@ public:
     return "Dropout";
   }
 
-  Tensor forward(const Tensor &x, const unordered_map<string, Tensor> &feed_dict) {
+  Tensor forward(const vector<Tensor> &xs, const unordered_map<string, Tensor> &feed_dict) {
     size_t _reversed_size;
-    assert(CUDNN_STATUS_SUCCESS == cudnnDropoutGetReserveSpaceSize(x.dataTensor->get(), &_reversed_size));
+    assert(CUDNN_STATUS_SUCCESS == cudnnDropoutGetReserveSpaceSize(xs[0].dataTensor->get(), &_reversed_size));
 
     if (reversed_size == ~0LU || _reversed_size > reversed_size) {
       reversed_size = _reversed_size;
       reversed = make_shared<DeviceMemory>(reversed_size);
     }
 
-    Tensor y(x.shape);
-    assert(CUDNN_STATUS_SUCCESS == cudnnDropoutForward(cudnnHandle, dropDesc, x.dataTensor->get(), (float*)x.d_data->get(),
+    Tensor y(xs[0].shape);
+    assert(CUDNN_STATUS_SUCCESS == cudnnDropoutForward(cudnnHandle, dropDesc, xs[0].dataTensor->get(), (float*)xs[0].d_data->get(),
       y.dataTensor->get(), (float*)y.d_data->get(), reversed->get(), reversed_size));
-    cacheTensors = {x, y};
+    cacheTensors = {xs[0], y};
     return move(y);
   }
 
-  Tensor backward(const Tensor &dy) {
+  vector<Tensor> backward(const Tensor &dy, const unordered_map<string, Tensor> &feed_dict) {
     const Tensor &x = cacheTensors[0], &y = cacheTensors[1];
     assert(CUDNN_STATUS_SUCCESS == cudnnRestoreDropoutDescriptor(dropDesc, cudnnHandle, drop_prob, states->get(), states_size, seed));
 
@@ -403,7 +408,7 @@ public:
     Tensor dx(x.shape);
     assert(CUDNN_STATUS_SUCCESS == cudnnDropoutBackward(cudnnHandle, dropDesc, dy.dataTensor->get(), (float*)dy.d_data->get(),
       dx.dataTensor->get(), (float*)dx.d_data->get(), reversed->get(), reversed_size));
-    return move(dx);
+    return { move(dx) };
   }
 };
 
@@ -425,16 +430,16 @@ public:
     return "Flatten";
   }
 
-  Tensor forward(const Tensor &x, const unordered_map<string, Tensor> &feed_dict) {
-    cacheTensors = {x};
+  Tensor forward(const vector<Tensor> &xs, const unordered_map<string, Tensor> &feed_dict) {
+    cacheTensors = {xs[0]};
     auto shape = this->get_output_shape();
-    shape[0] = x.shape[0];
-    return x.reshape(shape);
+    shape[0] = xs[0].shape[0];
+    return xs[0].reshape(shape);
   }
 
-  Tensor backward(const Tensor &dy) {
+  vector<Tensor> backward(const Tensor &dy, const unordered_map<string, Tensor> &feed_dict) {
     const Tensor &x = cacheTensors[0];
-    return dy.reshape(x.shape);
+    return { dy.reshape(x.shape) };
   }
 };
 
@@ -461,13 +466,13 @@ public:
     return "Dense";
   }
 
-  Tensor forward(const Tensor &x, const unordered_map<string, Tensor> &feed_dict) {
-    assert(x.shape.size() == 2);
+  Tensor forward(const vector<Tensor> &xs, const unordered_map<string, Tensor> &feed_dict) {
+    assert(xs[0].shape.size() == 2);
 
-    auto y = x.matmul(w, false, false);
-    // y = x * w + ones * bias';
+    auto y = xs[0].matmul(w, false, false);
+    // y = xs[0] * w + ones * bias';
     assert(y.shape.size() == 2 && bias.shape.size() == 2 && y.shape[1] == bias.shape[1] && y.shape[0] <= ones.shape[0]);
-    // auto wx_b = y.add(ones.reshape({x.shape[0], 1}, true).matmul(bias, false, false));
+    // auto wx_b = y.add(ones.reshape({xs[0].shape[0], 1}, true).matmul(bias, false, false));
     // return move(wx_b);
 
     float alpha = 1.0f;
@@ -479,15 +484,15 @@ public:
                 (float*)ones.d_data->get(), 1,  // 1
                 &alpha,
                 (float*)y.d_data->get(), y.shape[1]);  // self
-    cacheTensors = {x, y};
+    cacheTensors = {xs[0], y};
     return move(y);
   }
 
-  Tensor backward(const Tensor &dy) {
+  vector<Tensor> backward(const Tensor &dy, const unordered_map<string, Tensor> &feed_dict) {
     const Tensor &x = cacheTensors[0], &y = cacheTensors[1];
     assert(dy.shape == y.shape);
     // dx = dy * w'
-    return dy.matmul(w, false, true);
+    return { dy.matmul(w, false, true) };
   }
 
   vector<Tensor> get_gradients(const Tensor &dy) const {
@@ -539,7 +544,8 @@ public:
       cudnnSetFilter4dDescriptor(filterDesc, CUDNN_DATA_FLOAT, CUDNN_TENSOR_NCHW,
           filters, input_shape[1], kernel_size, kernel_size);
     }
-    int nn = input_shape[0], cc = filters, hh = (input_shape[2] + padding + padding - max(0, kernel_size - stride)) / stride, ww = (input_shape[3] + padding + padding - max(0, kernel_size - stride)) / stride;
+    int nn = input_shape[0], cc = filters, hh = (input_shape[2] + padding + padding - max(0, kernel_size - stride)) / stride,
+        ww = (input_shape[3] + padding + padding - max(0, kernel_size - stride)) / stride;
     return {nn, cc, hh, ww};
   }
 
@@ -547,36 +553,38 @@ public:
     return "Convolution";
   }
 
-  Tensor forward(const Tensor &x, const unordered_map<string, Tensor> &feed_dict) {
+  Tensor forward(const vector<Tensor> &xs, const unordered_map<string, Tensor> &feed_dict) {
     float alpha = 1.0f, beta = 0.0f;
     vector<int> output_shape = get_output_shape(), cu_shape(4);
-    output_shape[0] = x.shape[0];
-    assert(CUDNN_STATUS_SUCCESS == cudnnGetConvolution2dForwardOutputDim(convDesc, x.dataTensor->get(), filterDesc, \
+    output_shape[0] = xs[0].shape[0];
+    assert(CUDNN_STATUS_SUCCESS == cudnnGetConvolution2dForwardOutputDim(convDesc, xs[0].dataTensor->get(), filterDesc,
         &cu_shape[0], &cu_shape[1], &cu_shape[2], &cu_shape[3]));
     assert(output_shape == cu_shape);
 
     Tensor y(output_shape);
 
     cudnnConvolutionFwdAlgo_t convalgo;
-    assert(CUDNN_STATUS_SUCCESS == cudnnGetConvolutionForwardAlgorithm(cudnnHandle, x.dataTensor->get(), filterDesc, convDesc,
+    assert(CUDNN_STATUS_SUCCESS == cudnnGetConvolutionForwardAlgorithm(cudnnHandle, xs[0].dataTensor->get(), filterDesc, convDesc,
         y.dataTensor->get(), CUDNN_CONVOLUTION_FWD_PREFER_FASTEST, 0, &convalgo));
 
     size_t sizeInBytes;
-    assert(CUDNN_STATUS_SUCCESS == cudnnGetConvolutionForwardWorkspaceSize(cudnnHandle, x.dataTensor->get(), filterDesc, convDesc,
+    assert(CUDNN_STATUS_SUCCESS == cudnnGetConvolutionForwardWorkspaceSize(cudnnHandle, xs[0].dataTensor->get(), filterDesc, convDesc,
         y.dataTensor->get(), convalgo, &sizeInBytes));
 
     DeviceMemory workspace(sizeInBytes);
 
-    assert(CUDNN_STATUS_SUCCESS == cudnnConvolutionForward(cudnnHandle, &alpha, x.dataTensor->get(), (float*)x.d_data->get(), filterDesc,
-        (float*)w_krnl.d_data->get(), convDesc, convalgo, workspace.get(), sizeInBytes, &beta, y.dataTensor->get(), (float*)y.d_data->get()));
+    assert(CUDNN_STATUS_SUCCESS == cudnnConvolutionForward(cudnnHandle, &alpha, xs[0].dataTensor->get(), (float*)xs[0].d_data->get(),
+        filterDesc, (float*)w_krnl.d_data->get(), convDesc, convalgo, workspace.get(), sizeInBytes,
+        &beta, y.dataTensor->get(), (float*)y.d_data->get()));
+
     if (use_bias)
       assert(CUDNN_STATUS_SUCCESS == cudnnAddTensor(cudnnHandle,
         &alpha, w_bias.dataTensor->get(), (float*)w_bias.d_data->get(), &alpha, y.dataTensor->get(), (float*)y.d_data->get()));
-    cacheTensors = {x, y};
+    cacheTensors = {xs[0], y};
     return move(y);
   }
 
-  Tensor backward(const Tensor &dy) {
+  vector<Tensor> backward(const Tensor &dy, const unordered_map<string, Tensor> &feed_dict) {
     const Tensor &x = cacheTensors[0], &y = cacheTensors[1];
     float alpha = 1.0f, beta = 0.0f;
     assert(y.shape[1] == filters);
@@ -600,7 +608,7 @@ public:
                 dy.dataTensor->get(), (float*)dy.d_data->get(),
                 convDesc, dalgo, workspace.get(), sizeInBytes, &beta,
                 dx.dataTensor->get(), (float*)dx.d_data->get()));
-    return move(dx);
+    return { move(dx) };
   }
 
   vector<Tensor> get_gradients(const Tensor &dy) const {
