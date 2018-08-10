@@ -1,13 +1,3 @@
-## Example:
-
-```sh
-./run.sh mnist_mlp
-```
-
-## Available models:
-
-`mnist_mlp`, `mnist_cnn`, `cifar10_lenet`, `cifar10_alexnet`
-
 ## Datasets:
 
 mnist-images-idx3-ubyte: ([need gunzip](https://github.com/ghostplant/public/releases/download/mnist-dataset/mnist-images-idx3-ubyte.gz))
