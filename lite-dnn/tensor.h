@@ -31,7 +31,7 @@ public:
   DeviceMemory(size_t length): d_data(NULL), length(length) {
     if (length) {
       auto& it = cached_mem[length]; if (it.size()) { d_data = it.back(); it.pop_back(); return; }
-      assert(CUDA_SUCCESS == cuMemAlloc_v2((CUdeviceptr*)&d_data, length));
+      die_if(CUDA_SUCCESS != cuMemAlloc_v2((CUdeviceptr*)&d_data, length), "No more memory to allocate new buffer of size %zd B.", length);
     }
   }
 
@@ -281,35 +281,35 @@ public:
     cudnnDestroyOpTensorDescriptor(op_desc);
     return left;
   }
-};
 
+  pair<float, float> get_loss_and_accuracy_with(const Tensor &data_label) {
+    const Tensor &data_pred = *this;
+    assert(data_pred.shape.size() == 2 && data_pred.shape == data_label.shape);
 
-pair<float, float> get_loss_and_accuracy(const Tensor &data_pred, const Tensor &data_label) {
-  assert(data_pred.shape.size() == 2 && data_pred.shape == data_label.shape);
+    vector<float> pred_data = data_pred.clip_by_value(_EPSILON, 1.0f - _EPSILON).get_data();
+    vector<float> real_data = data_label.get_data();
 
-  vector<float> pred_data = data_pred.get_data();
-  vector<float> real_data = data_label.get_data();
-
-  float loss = 0.0f;
-  for (int i = 0; i < pred_data.size(); ++i) {
-    loss -= real_data[i] * log(pred_data[i]) + (1.0f - real_data[i]) * log(1.0f - pred_data[i]);
-  }
-  loss /= pred_data.size();
-
-  int tot = 0, acc = 0;
-  for (int i = 0; i < data_pred.shape[0]; ++i) {
-    int it = 0, jt = 0;
-    for (int j = 1; j < data_pred.shape[1]; ++j) {
-      if (pred_data[i * data_pred.shape[1] + it] < pred_data[i * data_pred.shape[1] + j])
-        it = j;
-      if (real_data[i * data_pred.shape[1] + jt] < real_data[i * data_pred.shape[1] + j])
-        jt = j;
+    float loss = 0.0f;
+    for (int i = 0; i < pred_data.size(); ++i) {
+      loss -= real_data[i] * log(pred_data[i]) + (1.0f - real_data[i]) * log(1.0f - pred_data[i]);
     }
-    ++tot;
-    if (it == jt)
-      ++acc;
+    loss /= pred_data.size();
+
+    int tot = 0, acc = 0;
+    for (int i = 0; i < data_pred.shape[0]; ++i) {
+      int it = 0, jt = 0;
+      for (int j = 1; j < data_pred.shape[1]; ++j) {
+        if (pred_data[i * data_pred.shape[1] + it] < pred_data[i * data_pred.shape[1] + j])
+          it = j;
+        if (real_data[i * data_pred.shape[1] + jt] < real_data[i * data_pred.shape[1] + j])
+          jt = j;
+      }
+      ++tot;
+      if (it == jt)
+        ++acc;
+    }
+    return {loss, acc * 100.0f / tot};
   }
-  return {loss, acc * 100.0f / tot};
-}
+};
 
 #endif

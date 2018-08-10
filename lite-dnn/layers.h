@@ -26,19 +26,19 @@ public:
 
   /////////////////////////////////////////////////////
 
-  Tensor predict_on_batch(const unordered_map<string, Tensor> &feed_dict = {}) {
+  Tensor predict(const unordered_map<string, Tensor> &feed_dict = {}) {
     vector<Tensor> xs;
     for (auto it: parents)
-      xs.push_back(it->predict_on_batch(feed_dict));
+      xs.push_back(it->predict(feed_dict));
     return this->forward(xs, feed_dict);
   }
 
-  vector<Tensor> compute_all_gradients(const Tensor &dy) {
-    auto dxs = this->backward(dy, {});
+  vector<Tensor> collect_all_gradients(const unordered_map<string, Tensor> &feed_dict, const Tensor &dy = {}) {
+    auto dxs = this->backward(dy, feed_dict);
     vector<Tensor> grads;
     die_if(dxs.size() != parents.size(), "the size of loss vector doesn't match the number of parent nodes.");
     for (int i = 0; i < parents.size(); ++i) {
-      auto prev = parents[i]->compute_all_gradients(dxs[i]);
+      auto prev = parents[i]->collect_all_gradients(feed_dict, dxs[i]);
       grads.insert(grads.end(), prev.begin(), prev.end());
     }
     auto curr = this->get_gradients(dy);
@@ -46,10 +46,10 @@ public:
     return move(grads);
   }
 
-  vector<Tensor> compute_all_weights() {
+  vector<Tensor> collect_all_weights() {
     vector<Tensor> weights;
     for (auto it: parents) {
-      auto prev = it->compute_all_weights();
+      auto prev = it->collect_all_weights();
       weights.insert(weights.end(), prev.begin(), prev.end());
     }
     auto curr = this->get_weights();
@@ -186,7 +186,9 @@ public:
 class SoftmaxCrossEntropy: public Layer {
 
 public:
-  SoftmaxCrossEntropy() {
+  string place_holder;
+
+  SoftmaxCrossEntropy(const string &place_holder): place_holder(place_holder) {
   }
 
   ~SoftmaxCrossEntropy() {
@@ -202,21 +204,24 @@ public:
     Tensor y(xs[0].shape);
     assert(CUDNN_STATUS_SUCCESS == cudnnSoftmaxForward(cudnnHandle, CUDNN_SOFTMAX_ACCURATE, CUDNN_SOFTMAX_MODE_INSTANCE,
         &alpha, xs[0].dataTensor->get(), (float*)xs[0].d_data->get(), &beta, y.dataTensor->get(), (float*)y.d_data->get()));
-    y = y.clip_by_value(_EPSILON, 1.0f - _EPSILON);
     cacheTensors = {y};
     return y;
   }
 
   vector<Tensor> backward(const Tensor &dy, const unordered_map<string, Tensor> &feed_dict) {
     const Tensor &y = cacheTensors[0];
-    assert(dy.shape == y.shape);
+    auto it = feed_dict.find(place_holder);
+    die_if(it == feed_dict.end(), "Cannot find item `%s` in feed_dict.", place_holder.c_str());
+    const Tensor &_dy = it->second;
 
-    float posi = 1.0f / dy.shape[0], nega = -1.0f / dy.shape[0];
-    size_t len = dy.count();
+    assert(_dy.shape == y.shape);
 
-    Tensor dx(dy.shape, 0.0f);
+    float posi = 1.0f / _dy.shape[0], nega = -1.0f / _dy.shape[0];
+    size_t len = _dy.count();
+
+    Tensor dx(_dy.shape, 0.0f);
     cublasSaxpy(cublasHandle, len, &posi, (float*)y.d_data->get(), 1, (float*)dx.d_data->get(), 1);
-    cublasSaxpy(cublasHandle, len, &nega, (float*)dy.d_data->get(), 1, (float*)dx.d_data->get(), 1);
+    cublasSaxpy(cublasHandle, len, &nega, (float*)_dy.d_data->get(), 1, (float*)dx.d_data->get(), 1);
     return { move(dx) };
   }
 };
