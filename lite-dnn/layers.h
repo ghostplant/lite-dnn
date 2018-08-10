@@ -2,12 +2,12 @@
 #define __LITEDNN_LAYERS__
 
 
-class Layer {
+class Layer: public std::enable_shared_from_this<Layer> {
 
 public:
   virtual string to_string() const = 0;
 
-  virtual Tensor forward(const Tensor &x) = 0;
+  virtual Tensor forward(const Tensor &x, const unordered_map<string, Tensor> &feed_dict) = 0;
 
   virtual Tensor backward(const Tensor &dy) = 0;
 
@@ -20,51 +20,160 @@ public:
     return {};
   }
 
-  virtual vector<int> configure(const vector<int> &input_shape) {
-    return input_shape;
+  virtual vector<int> get_output_shape() {
+    return this->input_shape;
   }
 
-  /*
+  /////////////////////////////////////////////////////
+
+  Tensor predict_on_batch(const unordered_map<string, Tensor> &feed_dict = {}) {
+    vector<Tensor> xs;
+    for (auto it: parents)
+      xs.push_back(it->predict_on_batch(feed_dict));
+    if (!xs.size())
+      xs.push_back(feed_dict.begin()->second);
+    return this->forward(xs[0], feed_dict);
+  }
+
+  vector<Tensor> compute_all_gradients(const Tensor &dy) {
+    auto dx = this->backward(dy);
+    vector<Tensor> grads;
+    for (auto it: parents) {
+      auto prev = it->compute_all_gradients(dx);
+      grads.insert(grads.end(), prev.begin(), prev.end());
+    }
+    auto curr = this->get_gradients(dy);
+    grads.insert(grads.end(), curr.begin(), curr.end());
+    return move(grads);
+  }
+
+  vector<Tensor> compute_all_weights() {
+    vector<Tensor> weights;
+    for (auto it: parents) {
+      auto prev = it->compute_all_weights();
+      weights.insert(weights.end(), prev.begin(), prev.end());
+    }
+    auto curr = this->get_weights();
+    weights.insert(weights.end(), curr.begin(), curr.end());
+    return move(weights);
+  }
+
+  shared_ptr<Layer> then(const shared_ptr<Layer> &that) {
+    assert(this->input_shape.size() > 0);
+    that->parents = { shared_from_this() };
+    that->input_shape = this->get_output_shape();
+    return that;
+  }
+
+  shared_ptr<Layer> summary(bool top = true) {
+    if (top) putchar('\n');
+
+    for (int i = 0; i < this->parents.size(); ++i)
+      this->parents[i]->summary(false);
+    printf(" => layer: %20s, output_shape: %s\n", this->to_string().c_str(), Tensor::stringify_shape(this->get_output_shape(), 1).c_str());
+
+    if (top) putchar('\n');
+    return shared_from_this();
+  }
+
+  bool load_weights_from_file(const char *weight_path, FILE *fp = nullptr) {
+    if (fp == nullptr) {
+      fp = fopen(weight_path, "rb");
+      if (fp == nullptr)
+        return false;
+      printf("  [@] Loading the weights file: ");
+    }
+    bool succ = true;
+    try {
+      for (int i = 0; i < this->parents.size(); ++i)
+        if (!this->parents[i]->load_weights_from_file(nullptr, fp))
+          throw fp;
+
+      for (auto &weight: this->get_weights()) {
+        vector<float> host(weight.count());
+        if (host.size() != fread(host.data(), sizeof(float), host.size(), fp))
+          throw fp;
+        weight.set_data(host.data());
+      }
+    } catch (...) {
+      succ = false;
+    }
+
+    if (weight_path != nullptr) {
+      ssize_t offset = ftell(fp);
+      fseek(fp, 0, SEEK_END);
+      if (ftell(fp) != offset)
+        succ = false;
+
+      fclose(fp);
+      puts(succ ? "YES." : "NO.");
+    }
+    return succ;
+  }
+
+  bool save_weights_to_file(const char *weight_path, FILE *fp = nullptr) {
+    if (fp == nullptr) {
+      fp = fopen(weight_path, "wb");
+      if (fp == nullptr)
+        return false;
+      printf("  [@] Saving the weights file: ");
+    }
+    bool succ = true;
+    try {
+      for (int i = 0; i < this->parents.size(); ++i)
+        if (!this->parents[i]->save_weights_to_file(nullptr, fp))
+          throw fp;
+
+      for (auto &weight: this->get_weights()) {
+        auto host = weight.get_data();
+        if (host.size() != fwrite(host.data(), sizeof(float), host.size(), fp))
+          throw fp;
+      }
+    } catch (...) {
+      succ = false;
+    }
+
+    if (weight_path != nullptr) {
+      fclose(fp);
+      puts(succ ? "YES." : "NO.");
+    }
+    return succ;
+  }
+
+
   vector<shared_ptr<Layer>> parents;
-  template <typename... Arguments> void from(Arguments... args) {
-    this->parents = {std::forward<Arguments>(args)...};
-  }
-  */
-
-protected:
   vector<Tensor> cacheTensors;
+  vector<int> input_shape;
 };
 
 
 class InputLayer: public Layer {
 
 public:
-  vector<int> input_shape;
+  string place_holder;
 
-  InputLayer(int channel, int height = -1, int width = -1): input_shape({-1, channel}) {
+  InputLayer(const string &place_holder, int channel, int height = -1, int width = -1): place_holder(place_holder) {
     if (height > 0 && width > 0)
-      input_shape.push_back(height), input_shape.push_back(width);
+      input_shape = {-1, channel, height, width};
+    else
+      input_shape = {-1, channel};
   }
 
   ~InputLayer() {
-  }
-
-  vector<int> configure(const vector<int> &input_shape = {}) {
-    if (input_shape.size() >= 1)
-      this->input_shape[0] = input_shape[0];
-    return this->input_shape;
   }
 
   string to_string() const {
     return "InputLayer";
   }
 
-  Tensor forward(const Tensor &x) {
-    int batch = input_shape[0];
-    input_shape[0] = x.shape[0];
-    die_if(input_shape != x.shape, "The input image shape %s doesn't match the shape of input layer.", Tensor::stringify_shape(x.shape, 1).c_str());
-    input_shape[0] = batch;
-    return x;
+  Tensor forward(const Tensor &x, const unordered_map<string, Tensor> &feed_dict) {
+    auto it = feed_dict.find(place_holder);
+    die_if(it == feed_dict.end(), "Cannot find item `%s` in feed_dict.", place_holder.c_str());
+
+    auto x_shape = it->second.shape;
+    x_shape[0] = -1;
+    die_if(input_shape != x_shape, "The shape of image fed doesn't match the expected shape of input layer: %s.", Tensor::stringify_shape(x_shape, 1).c_str());
+    return it->second;
   }
 
   Tensor backward(const Tensor &dy) {
@@ -86,13 +195,13 @@ public:
     return "SoftmaxCrossEntropy";
   }
 
-  Tensor forward(const Tensor &x) {
+  Tensor forward(const Tensor &x, const unordered_map<string, Tensor> &feed_dict) {
     float alpha = 1.0f, beta = 0.0f;
 
     Tensor y(x.shape);
     assert(CUDNN_STATUS_SUCCESS == cudnnSoftmaxForward(cudnnHandle, CUDNN_SOFTMAX_ACCURATE, CUDNN_SOFTMAX_MODE_INSTANCE,
         &alpha, x.dataTensor->get(), (float*)x.d_data->get(), &beta, y.dataTensor->get(), (float*)y.d_data->get()));
-
+    y = y.clip_by_value(_EPSILON, 1.0f - _EPSILON);
     cacheTensors = {y};
     return y;
   }
@@ -129,7 +238,7 @@ public:
     return "Activation";
   }
 
-  Tensor forward(const Tensor &x) {
+  Tensor forward(const Tensor &x, const unordered_map<string, Tensor> &feed_dict) {
     Tensor y(x.shape);
     float alpha = 1.0f, beta = 0.0f;
     assert(CUDNN_STATUS_SUCCESS == cudnnActivationForward(cudnnHandle, activationDesc, &alpha, x.dataTensor->get(), (float*)x.d_data->get(), &beta, y.dataTensor->get(), (float*)y.d_data->get()));
@@ -171,7 +280,7 @@ public:
     return "LRN";
   }
 
-  Tensor forward(const Tensor &x) {
+  Tensor forward(const Tensor &x, const unordered_map<string, Tensor> &feed_dict) {
     assert(x.shape.size() == 4);
 
     Tensor y(x.shape);
@@ -215,16 +324,15 @@ public:
     return "Pooling";
   }
 
-  vector<int> configure(const vector<int> &input_shape) {
+  vector<int> get_output_shape() {
     die_if(input_shape.size() != 4, "Currently Pooling Layer only suport 4D tensor.");
     return {input_shape[0], input_shape[1], (input_shape[2] - (size - stride)) / stride, (input_shape[3] - (size - stride)) / stride};
   }
 
-  Tensor forward(const Tensor &x) {
-    assert(x.shape.size() == 4);
-    // assert((x.shape[2] - (size - stride)) % stride == 0 && (x.shape[3] - (size - stride)) % stride == 0);
-
-    Tensor y(this->configure(x.shape));
+  Tensor forward(const Tensor &x, const unordered_map<string, Tensor> &feed_dict) {
+    auto shape = this->get_output_shape();
+    shape[0] = x.shape[0];
+    Tensor y(shape);
     float alpha = 1.0f, beta = 0.0f;
     assert(CUDNN_STATUS_SUCCESS == cudnnPoolingForward(cudnnHandle, poolDesc, &alpha, x.dataTensor->get(), (float*)x.d_data->get(), &beta, y.dataTensor->get(), (float*)y.d_data->get()));
 
@@ -268,7 +376,7 @@ public:
     return "Dropout";
   }
 
-  Tensor forward(const Tensor &x) {
+  Tensor forward(const Tensor &x, const unordered_map<string, Tensor> &feed_dict) {
     size_t _reversed_size;
     assert(CUDNN_STATUS_SUCCESS == cudnnDropoutGetReserveSpaceSize(x.dataTensor->get(), &_reversed_size));
 
@@ -306,7 +414,7 @@ public:
   Flatten() {
   }
 
-  vector<int> configure(const vector<int> &input_shape) {
+  vector<int> get_output_shape() {
     int count = 1;
     for (int i = 1; i < input_shape.size(); ++i)
       count *= input_shape[i];
@@ -317,9 +425,11 @@ public:
     return "Flatten";
   }
 
-  Tensor forward(const Tensor &x) {
+  Tensor forward(const Tensor &x, const unordered_map<string, Tensor> &feed_dict) {
     cacheTensors = {x};
-    return x.reshape(this->configure(x.shape));
+    auto shape = this->get_output_shape();
+    shape[0] = x.shape[0];
+    return x.reshape(shape);
   }
 
   Tensor backward(const Tensor &dy) {
@@ -338,7 +448,7 @@ public:
   Dense(int channels, int max_batch = 1024): channels(channels), ones({max_batch, 1}, 1.0f), w(), bias() {
   }
 
-  vector<int> configure(const vector<int> &input_shape) {
+  vector<int> get_output_shape() {
     if (w.count() < 1) {
       assert(input_shape.size() == 2);
       w = Tensor({input_shape[1], channels}, true);
@@ -351,7 +461,7 @@ public:
     return "Dense";
   }
 
-  Tensor forward(const Tensor &x) {
+  Tensor forward(const Tensor &x, const unordered_map<string, Tensor> &feed_dict) {
     assert(x.shape.size() == 2);
 
     auto y = x.matmul(w, false, false);
@@ -415,7 +525,7 @@ public:
       assert(CUDNN_STATUS_SUCCESS == cudnnDestroyConvolutionDescriptor(convDesc));
   }
 
-  vector<int> configure(const vector<int> &input_shape) {
+  vector<int> get_output_shape() {
     if (w_krnl.count() < 1) {
       w_krnl = Tensor({kernel_size, kernel_size, input_shape[1], filters}, true);
       if (use_bias) {
@@ -437,12 +547,10 @@ public:
     return "Convolution";
   }
 
-  Tensor forward(const Tensor &x) {
-    assert(x.shape.size() == 4);
-
+  Tensor forward(const Tensor &x, const unordered_map<string, Tensor> &feed_dict) {
     float alpha = 1.0f, beta = 0.0f;
-
-    vector<int> output_shape = configure(x.shape), cu_shape(4);
+    vector<int> output_shape = get_output_shape(), cu_shape(4);
+    output_shape[0] = x.shape[0];
     assert(CUDNN_STATUS_SUCCESS == cudnnGetConvolution2dForwardOutputDim(convDesc, x.dataTensor->get(), filterDesc, \
         &cu_shape[0], &cu_shape[1], &cu_shape[2], &cu_shape[3]));
     assert(output_shape == cu_shape);
@@ -519,7 +627,6 @@ public:
                 convDesc, falgo, workspace.get(), sizeInBytes, &beta,
                 filterDesc, (float*)grads[0].d_data->get()));
 
-
     if (use_bias) {
       grads.push_back(Tensor(w_bias.shape));
 
@@ -537,64 +644,5 @@ public:
     return move(weights);
   }
 };
-
-///////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
-
-void model_configure_shape(auto &model) {
-  puts("");
-  vector<int> val_shape;
-  for (int i = 0; i < model.size(); ++i) {
-    val_shape = model[i]->configure(val_shape);
-    printf("layer: %20s, output_shape = %s\n", model[i]->to_string().c_str(), Tensor::stringify_shape(val_shape, 1).c_str());
-  }
-  puts("");
-}
-
-bool model_load_weights(auto &model, const char *weight_path) {
-  FILE *fp = fopen(weight_path, "rb");
-  if (fp == nullptr)
-    return false;
-
-  puts("  [@] Loading saved weights ..");
-  ssize_t w_count = 0;
-  for (auto &layer: model) {
-    auto sym_weights = layer->get_weights();
-    for (auto &weight: sym_weights)
-      w_count += weight.count();
-  }
-  fseek(fp, 0, SEEK_END);
-  ssize_t f_bytes = ftell(fp);
-
-  die_if(f_bytes != w_count * sizeof(float), "The weight file `%s` doesn't match the current model.", weight_path);
-  fseek(fp, 0, SEEK_SET);
-
-  for (auto &layer: model) {
-    auto sym_weights = layer->get_weights();
-    for (auto &weight: sym_weights) {
-      vector<float> host(weight.count());
-      assert(host.size() == fread(host.data(), sizeof(float), host.size(), fp));
-      weight.set_data(host.data());
-    }
-  }
-  fclose(fp);
-  return true;
-}
-
-bool model_save_weights(auto &model, const char *weight_path) {
-  FILE *fp = fopen("weights.lw", "wb");
-  if (fp == nullptr)
-    return false;
-
-  puts("  [@] Saving saved weights ..");
-  for (auto &layer: model) {
-    auto sym_weights = layer->get_weights();
-    for (auto &weight: sym_weights) {
-      auto host = weight.get_data();
-      assert(host.size() == fwrite(host.data(), sizeof(float), host.size(), fp));
-    }
-  }
-  fclose(fp);
-  return true;
-}
 
 #endif
