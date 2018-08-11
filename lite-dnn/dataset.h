@@ -52,7 +52,9 @@ auto image_generator(string path, int height = 229, int width = 229, int cache_s
       }
       n_class = keyset.size();
 
-      printf("Total %d samples found with %d classes.\n", samples, n_class);
+      printf("\nTotal %d samples found with %d classes for `file://%s`:\n", samples, n_class, path.c_str());
+      for (int i = 0; i < n_class; ++i)
+        printf("  (*) class %d => %s (%zd samples)\n", i, keyset[i].c_str(), dict[keyset[i]].size());
 
       for (int i = 0; i < tids.size(); ++i)
         die_if(0 != pthread_create(&tids[i], NULL, Generator::start, this), "Failed to create intra-threads for data generation.");

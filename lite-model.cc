@@ -51,11 +51,12 @@ int main(int argc, char **argv) {
 
   const char *weight_path = "weights.lw";
   int batch_size = 128, steps = 60000;
-  // auto gen = image_generator("/docker/PetImages/Pics", 32, 32, 1024, 8);
+
+  /*
   auto gen = array_generator(CIFAR10_IMAGES, CIFAR10_LABELS);
 
-  // MLP
-  /*auto model = make_shared<InputLayer>("images_0", gen->channel, gen->height, gen->width)
+  // Mnist_MLP
+  auto model = make_shared<InputLayer>("images_0", gen->channel, gen->height, gen->width)
     ->then(make_shared<Flatten>())
     ->then(make_shared<Dense>(512))
     ->then(make_shared<Activation>(CUDNN_ACTIVATION_RELU))
@@ -63,9 +64,9 @@ int main(int argc, char **argv) {
     ->then(make_shared<Activation>(CUDNN_ACTIVATION_RELU))
     ->then(make_shared<Dense>(gen->n_class))
     ->then(make_shared<SoftmaxCrossEntropy>("labels_0"))
-    ->summary();*/
+    ->summary();
 
-  // Alexnet
+  // Cifar10_Alexnet
   auto model = make_shared<InputLayer>("images_0", gen->channel, gen->height, gen->width)
     ->then(make_shared<Convolution>(64, 5, true))
     ->then(make_shared<Activation>(CUDNN_ACTIVATION_RELU))
@@ -80,6 +81,41 @@ int main(int argc, char **argv) {
     ->then(make_shared<Activation>(CUDNN_ACTIVATION_RELU))
     ->then(make_shared<Dense>(192))
     ->then(make_shared<Activation>(CUDNN_ACTIVATION_RELU))
+    ->then(make_shared<Dense>(gen->n_class))
+    ->then(make_shared<SoftmaxCrossEntropy>("labels_0"))
+    ->summary();
+  */
+
+  die_if(0 != system("test -e /tmp/CatsAndDogs/.succ || (echo 'Downloading Cats-and-Dogs dataset ..' && curl -L https://github.com/ghostplant/public/releases/download/cats-and-dogs/cats-and-dogs.tar.gz | tar xzvf - -C /tmp >/dev/null && touch /tmp/CatsAndDogs/.succ)"),
+      "Failed to download sample dataset.");
+
+  auto gen = image_generator("/tmp/CatsAndDogs/train", 227, 227, 2048, 8);
+  auto val_gen = image_generator("/tmp/CatsAndDogs/validate", 227, 227, 2048, 1);
+
+  // ImageNet_Alexnet
+  auto model = make_shared<InputLayer>("images_0", gen->channel, gen->height, gen->width)
+    ->then(make_shared<Convolution>(96, 11, 4))
+    ->then(make_shared<Activation>(CUDNN_ACTIVATION_RELU))
+    ->then(make_shared<LRN>(4, 1.0, 0.001 / 9.0, 0.75))
+    ->then(make_shared<Pooling>(3, 2, CUDNN_POOLING_MAX))
+    ->then(make_shared<Convolution>(256, 5, 1, 2))
+    ->then(make_shared<Activation>(CUDNN_ACTIVATION_RELU))
+    ->then(make_shared<LRN>(4, 1.0, 0.001 / 9.0, 0.75))
+    ->then(make_shared<Pooling>(3, 2, CUDNN_POOLING_MAX))
+    ->then(make_shared<Convolution>(384, 3, 1, 1))
+    ->then(make_shared<Activation>(CUDNN_ACTIVATION_RELU))
+    ->then(make_shared<LRN>(4, 1.0, 0.001 / 9.0, 0.75))
+    ->then(make_shared<Convolution>(256, 3, 1, 1))
+    ->then(make_shared<Activation>(CUDNN_ACTIVATION_RELU))
+    ->then(make_shared<LRN>(4, 1.0, 0.001 / 9.0, 0.75))
+    ->then(make_shared<Pooling>(3, 2, CUDNN_POOLING_MAX))
+    ->then(make_shared<Flatten>())
+    ->then(make_shared<Dense>(4096))
+    ->then(make_shared<Activation>(CUDNN_ACTIVATION_RELU))
+    ->then(make_shared<Dropout>(0.25))
+    ->then(make_shared<Dense>(4096))
+    ->then(make_shared<Activation>(CUDNN_ACTIVATION_RELU))
+    ->then(make_shared<Dropout>(0.25))
     ->then(make_shared<Dense>(gen->n_class))
     ->then(make_shared<SoftmaxCrossEntropy>("labels_0"))
     ->summary();
@@ -117,8 +153,13 @@ int main(int argc, char **argv) {
 
     unsigned long currClock = get_microseconds();
     if (currClock >= lastClock + 1000000) {
-      auto loss_acc = predicts.get_loss_and_accuracy_with(batch_data.labels);
-      printf("==> step = %d: lr = %.4f, loss = %.4f, accuracy = %.2f%%, time = %.2fs\n", k, lr, loss_acc.first, loss_acc.second, (currClock - lastClock) * 1e-6f);
+      auto lacc = predicts.get_loss_and_accuracy_with(batch_data.labels);
+
+      auto val_batch_data = val_gen->next_batch(batch_size);
+      auto val_predicts = model->predict({{"images_0", val_batch_data.images}});
+      auto val_lacc = val_predicts.get_loss_and_accuracy_with(val_batch_data.labels);
+
+      printf("==> step = %d: loss = %.4f, acc = %.1f%%, val_loss = %.4f, val_acc = %.1f%%, time = %.2fs\n", k, lacc.first, lacc.second, val_lacc.first, val_lacc.second, (currClock - lastClock) * 1e-6f);
       lastClock = currClock;
     }
   }
