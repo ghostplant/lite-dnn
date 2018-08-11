@@ -44,10 +44,10 @@ auto image_generator(string path, int height = 229, int width = 229, int cache_s
       }
       closedir(root);
 
-      keyset.clear();
       int samples = 0;
       for (auto &it: dict) {
         keyset.push_back(it.first);
+        sort(keyset.begin(), keyset.end());
         samples += it.second.size();
       }
       n_class = keyset.size();
@@ -96,6 +96,8 @@ auto image_generator(string path, int height = 229, int width = 229, int cache_s
         while (1) {
           int c = rand() % dict.size();
           auto &files = dict[keyset[c]];
+          if (files.size() == 0)
+            continue;
           int it = rand() % files.size();
           if (get_image_data(keyset[c] + files[it], chw.data(), c, l.data()))
             break;
@@ -107,6 +109,7 @@ auto image_generator(string path, int height = 229, int width = 229, int cache_s
             pthread_mutex_unlock(&m_lock);
             if (thread_stop)
               return;
+            usleep(50000);
           } else
             break;
         }
