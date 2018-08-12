@@ -5,6 +5,9 @@
 #include <memory>
 #include <unordered_map>
 #include <random>
+#include <queue>
+#include <algorithm>
+
 
 #define _EPSILON 1.0e-7f
 

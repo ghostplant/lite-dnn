@@ -1,6 +1,8 @@
 #ifndef __LITEDNN_LAYERS__
 #define __LITEDNN_LAYERS__
 
+class Model;
+
 
 class Layer: public std::enable_shared_from_this<Layer> {
 
@@ -34,6 +36,9 @@ public:
     return that;
   }
 
+  shared_ptr<Model> compile() {
+    return make_shared<Model>(shared_from_this());
+  }
 
   vector<shared_ptr<Layer>> parents;
   vector<Tensor> cacheTensors;
