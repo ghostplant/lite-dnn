@@ -20,7 +20,12 @@ auto image_generator(string path, int height = 229, int width = 229, int cache_s
     pthread_mutex_t m_lock;
     bool thread_stop;
 
-    Generator(const string &path, int height, int width, int cache_size, int thread_para): height(height), width(width), cache_size(cache_size), tids(thread_para), channel(3) {
+    void *cudaHostPtr;
+    ssize_t cudaHostFloatCnt;
+
+    Generator(const string &path, int height, int width, int cache_size, int thread_para): height(height), width(width), channel(3),
+        cache_size(cache_size), tids(thread_para), cudaHostPtr(nullptr), cudaHostFloatCnt(0LU) {
+
       pthread_mutex_init(&m_lock, 0);
       thread_stop = 0;
 
@@ -66,6 +71,8 @@ auto image_generator(string path, int height = 229, int width = 229, int cache_s
       for (auto tid: tids)
         pthread_join(tid, &ret);
       pthread_mutex_destroy(&m_lock);
+      if (cudaHostPtr != nullptr)
+        assert(CUDA_SUCCESS == cuMemFreeHost(cudaHostPtr));
     }
 
 
@@ -125,15 +132,23 @@ auto image_generator(string path, int height = 229, int width = 229, int cache_s
     }
 
     auto next_batch(int batch_size = 32) {
-      vector<float> nchw(batch_size * channel * height * width);
-      vector<float> nl(batch_size * keyset.size());
+      size_t split = batch_size * channel * height * width, tail = split + batch_size * keyset.size();
+
+      if (cudaHostFloatCnt < tail) {
+        if (cudaHostPtr != nullptr)
+          assert(CUDA_SUCCESS == cuMemFreeHost(cudaHostPtr));
+        cudaHostFloatCnt = tail;
+        assert(CUDA_SUCCESS == cuMemHostAlloc(&cudaHostPtr, cudaHostFloatCnt * sizeof(float), 0));
+      }
+      // vector<float> nchw(batch_size * channel * height * width);
+      // vector<float> nl(batch_size * keyset.size());
 
       int it = 0;
       while (it < batch_size) {
         pthread_mutex_lock(&m_lock);
         while (it < batch_size && q_chw.size()) {
-          float *images = nchw.data() + (channel * height * width) * it;
-          float *labels = nl.data() + (n_class) * it;
+          float *images = ((float*)cudaHostPtr) + (channel * height * width) * it;
+          float *labels = ((float*)cudaHostPtr) + split + (n_class) * it;
           memcpy(images, q_chw.front().data(), (channel * height * width) * sizeof(float));
           memcpy(labels, q_l.front().data(), (n_class) * sizeof(float));
           q_chw.pop();
@@ -148,8 +163,8 @@ auto image_generator(string path, int height = 229, int width = 229, int cache_s
       };
 
       return dataset({
-        Tensor({batch_size, channel, height, width}, nchw.data()),
-        Tensor({batch_size, n_class}, nl.data())
+        Tensor({batch_size, channel, height, width}, ((float*)cudaHostPtr)),
+        Tensor({batch_size, n_class}, ((float*)cudaHostPtr) + split)
       });
     }
   };

@@ -26,124 +26,19 @@ public:
 
   /////////////////////////////////////////////////////
 
-  Tensor predict(const unordered_map<string, Tensor> &feed_dict = {}) {
-    vector<Tensor> xs;
-    for (auto it: parents)
-      xs.push_back(it->predict(feed_dict));
-    return this->forward(xs, feed_dict);
-  }
-
-  vector<Tensor> collect_all_gradients(const unordered_map<string, Tensor> &feed_dict, const Tensor &dy = {}) {
-    auto dxs = this->backward(dy, feed_dict);
-    vector<Tensor> grads;
-    die_if(dxs.size() != parents.size(), "the size of loss vector doesn't match the number of parent nodes.");
-    for (int i = 0; i < parents.size(); ++i) {
-      auto prev = parents[i]->collect_all_gradients(feed_dict, dxs[i]);
-      grads.insert(grads.end(), prev.begin(), prev.end());
-    }
-    auto curr = this->get_gradients(dy);
-    grads.insert(grads.end(), curr.begin(), curr.end());
-    return move(grads);
-  }
-
-  vector<Tensor> collect_all_weights() {
-    vector<Tensor> weights;
-    for (auto it: parents) {
-      auto prev = it->collect_all_weights();
-      weights.insert(weights.end(), prev.begin(), prev.end());
-    }
-    auto curr = this->get_weights();
-    weights.insert(weights.end(), curr.begin(), curr.end());
-    return move(weights);
-  }
-
   shared_ptr<Layer> then(const shared_ptr<Layer> &that) {
     assert(this->input_shape.size() > 0);
     that->parents = { shared_from_this() };
     that->input_shape = this->get_output_shape();
+    that->depth = this->depth + 1;
     return that;
-  }
-
-  shared_ptr<Layer> summary(bool top = true) {
-    if (top) putchar('\n');
-
-    for (int i = 0; i < this->parents.size(); ++i)
-      this->parents[i]->summary(false);
-    printf(" => layer: %20s, output_shape: %s\n", this->to_string().c_str(),
-        Tensor::stringify_shape(this->get_output_shape(), 1).c_str());
-
-    if (top) putchar('\n');
-    return shared_from_this();
-  }
-
-  bool load_weights_from_file(const char *weight_path, FILE *fp = nullptr) {
-    if (fp == nullptr) {
-      fp = fopen(weight_path, "rb");
-      if (fp == nullptr)
-        return false;
-      printf("  [@] Loading the weights file: ");
-    }
-    bool succ = true;
-    try {
-      for (int i = 0; i < this->parents.size(); ++i)
-        if (!this->parents[i]->load_weights_from_file(nullptr, fp))
-          throw fp;
-
-      for (auto &weight: this->get_weights()) {
-        vector<float> host(weight.count());
-        if (host.size() != fread(host.data(), sizeof(float), host.size(), fp))
-          throw fp;
-        weight.set_data(host.data());
-      }
-    } catch (...) {
-      succ = false;
-    }
-
-    if (weight_path != nullptr) {
-      ssize_t offset = ftell(fp);
-      fseek(fp, 0, SEEK_END);
-      if (ftell(fp) != offset)
-        succ = false;
-
-      fclose(fp);
-      puts(succ ? "YES.\n" : "NO.\n");
-    }
-    return succ;
-  }
-
-  bool save_weights_to_file(const char *weight_path, FILE *fp = nullptr) {
-    if (fp == nullptr) {
-      fp = fopen(weight_path, "wb");
-      if (fp == nullptr)
-        return false;
-      printf("  [@] Saving the weights file: ");
-    }
-    bool succ = true;
-    try {
-      for (int i = 0; i < this->parents.size(); ++i)
-        if (!this->parents[i]->save_weights_to_file(nullptr, fp))
-          throw fp;
-
-      for (auto &weight: this->get_weights()) {
-        auto host = weight.get_data();
-        if (host.size() != fwrite(host.data(), sizeof(float), host.size(), fp))
-          throw fp;
-      }
-    } catch (...) {
-      succ = false;
-    }
-
-    if (weight_path != nullptr) {
-      fclose(fp);
-      puts(succ ? "YES.\n" : "NO.\n");
-    }
-    return succ;
   }
 
 
   vector<shared_ptr<Layer>> parents;
   vector<Tensor> cacheTensors;
   vector<int> input_shape;
+  int depth;
 };
 
 
@@ -157,6 +52,7 @@ public:
       input_shape = {-1, channel, height, width};
     else
       input_shape = {-1, channel};
+    this->depth = 1;
   }
 
   ~InputLayer() {
@@ -190,10 +86,15 @@ public:
     this->parents = {a...};
     die_if(this->parents.size() == 0, "Not allowed to have zero parent layer to add.");
 
-    vector<int> output_shape = this->parents[0]->get_output_shape();
-    for (int i = 1; i < this->parents.size(); ++i)
-      die_if(output_shape != this->parents[i]->get_output_shape(), "Output shape for each parent layer doesn't match with each other.");
-    this->input_shape = output_shape;
+    this->input_shape = this->parents[0]->get_output_shape();
+    this->depth = this->parents[0]->depth;
+
+    for (int i = 1; i < this->parents.size(); ++i) {
+      die_if(this->input_shape != this->parents[i]->get_output_shape(), "Output shape for each parent layer doesn't match with each other.");
+      this->depth = max(this->depth, this->parents[i]->depth);
+    }
+
+    ++this->depth;
   }
 
   ~Concat() {
@@ -582,8 +483,9 @@ public:
       cudnnSetFilter4dDescriptor(filterDesc, CUDNN_DATA_FLOAT, CUDNN_TENSOR_NCHW,
           filters, input_shape[1], kernel_size, kernel_size);
     }
-    int nn = input_shape[0], cc = filters, hh = (input_shape[2] + padding + padding - max(0, kernel_size - stride)) / stride,
-        ww = (input_shape[3] + padding + padding - max(0, kernel_size - stride)) / stride;
+    int nn = input_shape[0], cc = filters;
+    int hh = (input_shape[2] + padding + padding - kernel_size) / stride + 1,
+        ww = (input_shape[3] + padding + padding - kernel_size) / stride + 1;
     return {nn, cc, hh, ww};
   }
 
@@ -597,7 +499,8 @@ public:
     output_shape[0] = xs[0].shape[0];
     assert(CUDNN_STATUS_SUCCESS == cudnnGetConvolution2dForwardOutputDim(convDesc, xs[0].dataTensor->get(), filterDesc,
         &cu_shape[0], &cu_shape[1], &cu_shape[2], &cu_shape[3]));
-    assert(output_shape == cu_shape);
+    die_if(output_shape != cu_shape, "Conv layer not matching: %s & %s.",
+        Tensor::stringify_shape(output_shape).c_str(), Tensor::stringify_shape(cu_shape).c_str());
 
     Tensor y(output_shape);
 
