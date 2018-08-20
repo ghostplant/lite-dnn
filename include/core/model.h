@@ -134,11 +134,11 @@ public:
       auto &layer = layers[i];
       assert(dys.count(layer) > 0);
 
-      auto curr = layer->get_gradients(dys[layer]);
-      grads.insert(grads.end(), curr.begin(), curr.end());
-
       auto dxs = layer->backward(dys[layer], feed_dict);
       die_if(dxs.size() != layer->parents.size(), "the size of loss vector doesn't match the number of parent nodes.");
+
+      auto curr = layer->get_gradients(dys[layer]);
+      grads.insert(grads.end(), curr.begin(), curr.end());
 
       for (int i = layer->parents.size() - 1; i >= 0; --i) {
         auto parent = layer->parents[i].get();

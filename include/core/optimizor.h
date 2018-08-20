@@ -29,6 +29,8 @@ public:
       speed *= pow((1.0f + decay * k), -0.75f), ++k;
 
     for (int i = 0; i < symbolic_weights.size(); ++i) {
+      if (!symbolic_weights[i].trainable)
+        continue;
       symbolic_velocity[i].self_update(symbolic_gradients[i], speed, momentum);
       symbolic_weights[i].self_add(symbolic_velocity[i], -1.0f);
     }
@@ -51,7 +53,10 @@ public:
     if (decay > 0)
       speed *= pow((1.0f + decay * k), -0.75f), ++k;
 
-    for (int i = 0; i < symbolic_weights.size(); ++i)
+    for (int i = 0; i < symbolic_weights.size(); ++i) {
+      if (!symbolic_weights[i].trainable)
+        continue;
       symbolic_weights[i].self_add(symbolic_gradients[i], -speed);
+    }
   }
 };

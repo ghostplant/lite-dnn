@@ -272,7 +272,7 @@ public:
   }
 
   vector<int> get_output_shape() {
-    die_if(input_shape.size() != 4, "Currently Pooling Layer only suport 4D tensor.");
+    die_if(input_shape.size() != 4, "Currently Pooling Layer only suport 4D tensor (NCHW).");
     return {input_shape[0], input_shape[1], (input_shape[2] - (size - stride)) / stride, (input_shape[3] - (size - stride)) / stride};
   }
 
@@ -596,6 +596,81 @@ public:
     if (use_bias)
       weights.push_back(w_bias);
     return move(weights);
+  }
+};
+
+
+class BatchNormalization: public Layer {
+  unsigned long steps;
+  Tensor bnScal, bnBias, e_vari, e_mean, s_vari, s_mean, g_scal, g_bias;
+  cudnnBatchNormMode_t bnMode;
+
+public:
+  BatchNormalization(): bnMode(CUDNN_BATCHNORM_SPATIAL /*CUDNN_BATCHNORM_PER_ACTIVATION*/), steps(1) {
+  }
+
+  ~BatchNormalization() {
+  }
+
+  vector<int> get_output_shape() {
+    die_if(input_shape.size() != 4, "Currently Pooling Layer only suport 4D tensor (NCHW).");
+    if (bnScal.count() < 1) {
+      bnScal = Tensor({1, input_shape[1], 1, 1}, 1.0f);
+      bnBias = Tensor({1, input_shape[1], 1, 1}, 0.0f);
+      e_vari = Tensor({1, input_shape[1], 1, 1}, 1.0f);
+      e_mean = Tensor({1, input_shape[1], 1, 1}, 0.0f);
+      s_vari = Tensor({1, input_shape[1], 1, 1}, 0.0f);
+      s_mean = Tensor({1, input_shape[1], 1, 1}, 0.0f);
+      g_scal = Tensor({1, input_shape[1], 1, 1}, 0.0f);
+      g_bias = Tensor({1, input_shape[1], 1, 1}, 0.0f);
+
+      e_vari.trainable = e_mean.trainable = false;
+    }
+    return input_shape;
+  }
+
+  string to_string() const {
+    return "BatchNormalization";
+  }
+
+  Tensor forward(const vector<Tensor> &xs, const unordered_map<string, Tensor> &feed_dict) {
+    // y = (x - e_mean) / sqrt(e_vari) * bnScale + bnBias
+
+    Tensor y(xs[0].shape);
+    float alpha = 1.0f, beta = 0.0f;
+    assert(CUDNN_STATUS_SUCCESS == cudnnBatchNormalizationForwardTraining(cudnnHandle, bnMode,
+      &alpha, &beta, xs[0].dataTensor->get(), (float*)xs[0].d_data->get(), y.dataTensor->get(), (float*)y.d_data->get(),
+      bnScal.dataTensor->get(), (float*)bnScal.d_data->get(), (float*)bnBias.d_data->get(),
+      1.0 / steps, // extra for training
+      (float*)e_mean.d_data->get(), (float*)e_vari.d_data->get(), CUDNN_BN_MIN_EPSILON,
+      (float*)s_mean.d_data->get(), (float*)s_vari.d_data->get())); // extra for training
+
+    cacheTensors = {xs[0], y};
+    return move(y);
+  }
+
+  vector<Tensor> backward(const Tensor &dy, const unordered_map<string, Tensor> &feed_dict) {
+    const Tensor &x = cacheTensors[0], &y = cacheTensors[1];
+
+    Tensor dx(dy.shape);
+    float alpha = 1.0f, beta = 0.0f;
+
+    assert(CUDNN_STATUS_SUCCESS == cudnnBatchNormalizationBackward(cudnnHandle, bnMode,
+      &alpha, &beta, &alpha, &beta, x.dataTensor->get(), (float*)x.d_data->get(), y.dataTensor->get(), (float*)y.d_data->get(),
+      dx.dataTensor->get(), (float*)dx.d_data->get(), bnScal.dataTensor->get(),
+      (float*)bnScal.d_data->get(), (float*)g_scal.d_data->get(), (float*)g_bias.d_data->get(), CUDNN_BN_MIN_EPSILON,
+      (float*)s_mean.d_data->get(), (float*)s_vari.d_data->get()));
+
+    ++steps;
+    return { move(dx) };
+  }
+
+  vector<Tensor> get_weights() const {
+    return {bnScal, bnBias, e_vari, e_mean};
+  }
+
+  vector<Tensor> get_gradients(const Tensor &dy) const {
+    return {g_scal, g_bias, {}, {}};
   }
 };
 
