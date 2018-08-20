@@ -15,8 +15,8 @@
 #undef assert
 #endif
 
-#define die_if(__cond__, __desc__, ...) ({if (__cond__) { printf("  \033[33m[!] " __desc__ "\033[0m\n\n", ##__VA_ARGS__); fflush(stdout); exit(1);}})
-#define assert(__cond__)  die_if(!(__cond__), "Assertion failed: file %s: line %d.", __FILE__, __LINE__)
+#define die_if(__cond__, __desc__, ...) ({if (__cond__) { printf("  \033[33m[!] <<file %s:%d>> " __desc__ "\033[0m\n\n", __FILE__, __LINE__, ##__VA_ARGS__); fflush(stdout); sessionQuit();}})
+#define assert(__cond__)  die_if(!(__cond__), "Assertion failed: %s.", #__cond__)
 
 using namespace std;
 
@@ -24,6 +24,13 @@ static unordered_map<size_t, vector<void*>> cached_mem;
 static cudnnHandle_t cudnnHandle;
 static cublasHandle_t cublasHandle;
 static CUstream hStream = NULL;
+
+static void sessionQuit() {
+  assert(CUDA_SUCCESS == cuCtxSynchronize());
+  assert(CUBLAS_STATUS_SUCCESS == cublasDestroy(cublasHandle));
+  assert(CUDNN_STATUS_SUCCESS == cudnnDestroy(cudnnHandle));
+  exit(1);
+}
 
 
 class DeviceMemory {
@@ -81,6 +88,7 @@ public:
   shared_ptr<DeviceMemory> d_data;
   shared_ptr<TensorHandler> dataTensor;
   vector<int> shape;
+  bool trainable;
 
   static void init(bool randTime = false) {
     int devCount = 0;
@@ -166,6 +174,7 @@ public:
 
   size_t setup_tensor(const vector<int> &shape) {
     this->shape = shape;
+    this->trainable = true;
     size_t len = count();
     d_data = make_shared<DeviceMemory>(len * sizeof(float));
     dataTensor = make_shared<TensorHandler>(shape);
