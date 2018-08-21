@@ -40,8 +40,7 @@ class DeviceMemory {
 public:
   DeviceMemory(size_t length): d_data(NULL), length(length) {
     if (length) {
-      if (cached_mem.size() < devices.size())
-        cached_mem.resize(devices.size());
+      if (cached_mem.size() < devices.size()) cached_mem.resize(devices.size());
       auto& it = cached_mem[currentDev][length]; if (it.size()) { d_data = it.back(); it.pop_back(); return; }
       die_if(CUDA_SUCCESS != cuMemAlloc_v2((CUdeviceptr*)&d_data, length), "No more memory to allocate new buffer of size %zd B.", length);
     }
@@ -95,6 +94,10 @@ public:
   static int deviceCount() {
     return devices.size();
   }
+
+  static void synchronizeCurrentDevice() {
+    assert(CUDA_SUCCESS == cuStreamSynchronize(devices[currentDev].hStream));
+  }
   
   static void activateCurrentDevice(int dev) {
     assert(dev < devices.size());
@@ -119,7 +122,7 @@ public:
 
     devices.resize(devCount);
 
-    for (int i = 0; i < 2; ++i) {
+    for (int i = 0; i < devCount; ++i) {
       assert(CUDA_SUCCESS == cuDevicePrimaryCtxRetain(&devices[i].hContext, i));
       assert(CUDA_SUCCESS == cuCtxSetCurrent(devices[i].hContext));
       assert(CUDA_SUCCESS == cuStreamCreate(&devices[i].hStream, CU_STREAM_NON_BLOCKING));
@@ -259,9 +262,9 @@ public:
     assert(0 == cublasSgemm(cublasHandle,
                             transposeA ? CUBLAS_OP_T : CUBLAS_OP_N, transposeB ? CUBLAS_OP_T : CUBLAS_OP_N,
                             ax, by, ay, &alpha,
-                            (float*)A->d_data->get(), A->shape[1], // X
+                            (float*)A->d_data->get(), A->shape[1],  // X
                             (float*)B->d_data->get(), B->shape[1],  // Y
-                            &beta, (float*)ans.d_data->get(), ans.shape[1]));   // Z
+                            &beta, (float*)ans.d_data->get(), ans.shape[1]));  // Z
     return ans;
   }
 

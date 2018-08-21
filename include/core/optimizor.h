@@ -2,27 +2,26 @@
 class Optimizor {
 
 public:
-  virtual void apply_updates(vector<Tensor> &symbolic_weights, const vector<Tensor> &symbolic_gradients) = 0;
+  virtual void apply_updates(const vector<Tensor> &symbolic_gradients) = 0;
 };
 
 
-class MomentumOptimizor {
+class MomentumOptimizor: public Optimizor {
 
   float momentum, lr, decay, k;
-  vector<Tensor> symbolic_velocity;
+  vector<Tensor> symbolic_velocity, symbolic_weights;
 
 public:
-  MomentumOptimizor(float momentum = 0.9f, float lr = 0.01f, float decay = 0.0f): momentum(momentum), lr(lr), k(0) {
+  MomentumOptimizor(const shared_ptr<Model> &model, float momentum = 0.9f, float lr = 0.01f, float decay = 0.0f):
+      symbolic_weights(model->collect_all_weights()), momentum(momentum), lr(lr), k(0) {
+
+    symbolic_velocity.resize(symbolic_weights.size());
+    for (int i = 0; i < symbolic_weights.size(); ++i)
+      symbolic_velocity[i] = Tensor(symbolic_weights[i].shape, 0.0f);
   }
 
-  void apply_updates(vector<Tensor> &symbolic_weights, const vector<Tensor> &symbolic_gradients) {
+  void apply_updates(const vector<Tensor> &symbolic_gradients) {
     die_if(symbolic_weights.size() != symbolic_gradients.size(), "The quantity of weights and gradients doesn't match.");
-
-    if (symbolic_velocity.size() != symbolic_weights.size()) {
-      symbolic_velocity.resize(symbolic_weights.size());
-      for (int i = 0; i < symbolic_weights.size(); ++i)
-        symbolic_velocity[i] = Tensor(symbolic_weights[i].shape, 0.0f);
-    }
 
     float speed = lr;
     if (decay > 0)
@@ -38,15 +37,17 @@ public:
 };
 
 
-class SGDOptimizor {
+class SGDOptimizor: public Optimizor {
 
   float lr, decay, k;
+  vector<Tensor> symbolic_weights;
 
 public:
-  SGDOptimizor(float lr = 0.01f, float decay = 0.0f): lr(lr), decay(decay), k(0) {
+  SGDOptimizor(const shared_ptr<Model> &model, float lr = 0.01f, float decay = 0.0f):
+      symbolic_weights(model->collect_all_weights()), lr(lr), decay(decay), k(0) {
   }
 
-  void apply_updates(vector<Tensor> &symbolic_weights, const vector<Tensor> &symbolic_gradients) {
+  void apply_updates(const vector<Tensor> &symbolic_gradients) {
     die_if(symbolic_weights.size() != symbolic_gradients.size(), "The quantity of weights and gradients doesn't match.");
 
     float speed = lr;
