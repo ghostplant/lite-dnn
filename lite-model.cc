@@ -54,6 +54,7 @@ int main(int argc, char **argv) {
   Tensor::init();
 
   int batch_size = 64, steps = 50000;
+  Tensor::activateCurrentDevice(0);
 
   // * Mnist_MLP
   /*auto gen = array_generator(MNIST_IMAGES, MNIST_LABELS), &val_gen = gen;
@@ -72,6 +73,8 @@ int main(int argc, char **argv) {
   die_if(0 != system("test -e /tmp/CatsAndDogs/.succ || (echo 'Downloading Cats-and-Dogs dataset ..' && curl -L https://github.com/ghostplant/public/releases/download/cats-and-dogs/cats-and-dogs.tar.gz | tar xzvf - -C /tmp >/dev/null && touch /tmp/CatsAndDogs/.succ)"), "Failed to download sample dataset.");
   auto gen = image_generator("/tmp/CatsAndDogs/train", 224, 224, 2048, 8),
          val_gen = image_generator("/tmp/CatsAndDogs/validate", 224, 224, 2048, 1);
+
+
   auto model = lite_dnn::apps::imagenet_alexnet::
          create_model("image_place_0", "label_place_0", {gen->channel, gen->height, gen->width}, gen->n_class);
 
