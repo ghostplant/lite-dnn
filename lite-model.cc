@@ -54,7 +54,6 @@ int main(int argc, char **argv) {
   Tensor::init();
 
   int batch_size = 64, steps = 50000;
-  Tensor::activateCurrentDevice(0);
 
   // * Mnist_MLP
   /*auto gen = array_generator(MNIST_IMAGES, MNIST_LABELS), &val_gen = gen;
@@ -71,41 +70,53 @@ int main(int argc, char **argv) {
 
   // * ImageNet_AlexNet
   die_if(0 != system("test -e /tmp/CatsAndDogs/.succ || (echo 'Downloading Cats-and-Dogs dataset ..' && curl -L https://github.com/ghostplant/public/releases/download/cats-and-dogs/cats-and-dogs.tar.gz | tar xzvf - -C /tmp >/dev/null && touch /tmp/CatsAndDogs/.succ)"), "Failed to download sample dataset.");
-  auto gen = image_generator("/tmp/CatsAndDogs/train", 224, 224, 2048, 8),
+  auto gen = image_generator("/tmp/CatsAndDogs/train", 224, 224, 2048 * 8, 8),
          val_gen = image_generator("/tmp/CatsAndDogs/validate", 224, 224, 2048, 1);
 
+  int ngpus = 1;
 
-  auto model = lite_dnn::apps::imagenet_alexnet::
-         create_model("image_place_0", "label_place_0", {gen->channel, gen->height, gen->width}, gen->n_class);
+  vector<shared_ptr<Model>> model_replias(ngpus);
+  vector<shared_ptr<Optimizor>> optimizors(ngpus);
 
-  model->load_weights_from_file("weights.lw");
+  for (int i = 0; i < ngpus; ++i) {
+    Tensor::activateCurrentDevice(i);
 
-  auto optimizor = MomentumOptimizor(0.9f, 0.01f);
-  auto symbolic_weights = model->collect_all_weights();
+    model_replias[i] = lite_dnn::apps::imagenet_alexnet::
+      create_model("image_place_0", "label_place_0", {gen->channel, gen->height, gen->width}, gen->n_class);
+    model_replias[i]->load_weights_from_file("weights.lw");
+
+    optimizors[i] = make_shared<MomentumOptimizor>(model_replias[i], 0.9f);
+  }
 
   unsigned long lastClock = get_microseconds();
+
   for (int k = 0; k < steps; ++k) {
+    vector<Tensor> predicts(ngpus);
 
-    auto batch_data = gen->next_batch(batch_size);
-    unordered_map<string, Tensor> feed_dict = {{"image_place_0", batch_data.images}, {"label_place_0", batch_data.labels}};
+    for (int i = 0; i < ngpus; ++i) {
+      Tensor::activateCurrentDevice(i);
 
-    auto predicts = model->predict(feed_dict);
-    auto symbolic_gradients = model->collect_all_gradients(feed_dict);
-    optimizor.apply_updates(symbolic_weights, symbolic_gradients);
+      auto batch_data = gen->next_batch(batch_size);
+      unordered_map<string, Tensor> feed_dict = {{"image_place_0", batch_data.images}, {"label_place_0", batch_data.labels}};
+
+      predicts[i] = model_replias[i]->predict(feed_dict);
+      auto symbolic_gradients = model_replias[i]->collect_all_gradients(feed_dict);
+      optimizors[i]->apply_updates(symbolic_gradients);
+    }
 
     unsigned long currClock = get_microseconds();
     if (currClock >= lastClock + 1000000) {
-      auto lacc = predicts.get_loss_and_accuracy_with(batch_data.labels);
+      Tensor::activateCurrentDevice(0);
 
       auto val_batch_data = val_gen->next_batch(batch_size);
-      auto val_predicts = model->predict({{"image_place_0", val_batch_data.images}});
+      auto val_predicts = model_replias[0]->predict({{"image_place_0", val_batch_data.images}});
       auto val_lacc = val_predicts.get_loss_and_accuracy_with(val_batch_data.labels);
 
-      printf("==> step = %d: loss = %.4f, acc = %.1f%%, val_loss = %.4f, val_acc = %.1f%%, time = %.2fs\n", k, lacc.first, lacc.second, val_lacc.first, val_lacc.second, (currClock - lastClock) * 1e-6f);
+      printf("==> step = %d: val_loss = %.4f, val_acc = %.1f%%, time = %.2fs\n", k, val_lacc.first, val_lacc.second, (currClock - lastClock) * 1e-6f);
       lastClock = currClock;
     }
   }
 
-  model->save_weights_to_file("weights.lw");
+  model_replias[0]->save_weights_to_file("weights.lw");
   return 0;
 }
