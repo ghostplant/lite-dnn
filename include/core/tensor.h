@@ -9,28 +9,28 @@
 #include <algorithm>
 
 
-#define _EPSILON 1.0e-7f
-
 #ifdef assert
 #undef assert
 #endif
 
-#define die_if(__cond__, __desc__, ...) ({if (__cond__) { printf("  \033[33m[!] <<file %s:%d>> " __desc__ "\033[0m\n\n", __FILE__, __LINE__, ##__VA_ARGS__); fflush(stdout); sessionQuit();}})
+#define die_if(__cond__, __desc__, ...) ({if (__cond__) { printf("  \033[33m[!] <<file %s:%d>> " __desc__ "\033[0m\n\n", __FILE__, __LINE__, ##__VA_ARGS__); fflush(stdout); exit(1);}})
 #define assert(__cond__)  die_if(!(__cond__), "Assertion failed: %s.", #__cond__)
 
 using namespace std;
 
-static unordered_map<size_t, vector<void*>> cached_mem;
+struct DeviceResources {
+  CUstream hStream;
+  CUcontext hContext;
+  cudnnHandle_t hCudnn;
+  cublasHandle_t hCublas;
+};
+
+static vector<DeviceResources> devices;
+
+static vector<unordered_map<size_t, vector<void*>>> cached_mem;
 static cudnnHandle_t cudnnHandle;
 static cublasHandle_t cublasHandle;
-static CUstream hStream = NULL;
-
-static void sessionQuit() {
-  assert(CUDA_SUCCESS == cuCtxSynchronize());
-  assert(CUBLAS_STATUS_SUCCESS == cublasDestroy(cublasHandle));
-  assert(CUDNN_STATUS_SUCCESS == cudnnDestroy(cudnnHandle));
-  exit(1);
-}
+static int currentDev;
 
 
 class DeviceMemory {
@@ -40,14 +40,16 @@ class DeviceMemory {
 public:
   DeviceMemory(size_t length): d_data(NULL), length(length) {
     if (length) {
-      auto& it = cached_mem[length]; if (it.size()) { d_data = it.back(); it.pop_back(); return; }
+      if (cached_mem.size() < devices.size())
+        cached_mem.resize(devices.size());
+      auto& it = cached_mem[currentDev][length]; if (it.size()) { d_data = it.back(); it.pop_back(); return; }
       die_if(CUDA_SUCCESS != cuMemAlloc_v2((CUdeviceptr*)&d_data, length), "No more memory to allocate new buffer of size %zd B.", length);
     }
   }
 
   ~DeviceMemory() {
     if (d_data) {
-      cached_mem[length].push_back(d_data); return;
+      cached_mem[currentDev][length].push_back(d_data); return;
       assert(CUDA_SUCCESS == cuMemFree_v2((CUdeviceptr)d_data));
     }
   }
@@ -90,26 +92,43 @@ public:
   vector<int> shape;
   bool trainable;
 
+  static int deviceCount() {
+    return devices.size();
+  }
+  
+  static void activateCurrentDevice(int dev) {
+    assert(dev < devices.size());
+    currentDev = dev;
+    assert(CUDA_SUCCESS == cuCtxSetCurrent(devices[dev].hContext));
+    cublasHandle = devices[dev].hCublas;
+    cudnnHandle = devices[dev].hCudnn;
+    assert(CUBLAS_STATUS_SUCCESS == cublasSetStream_v2(cublasHandle, devices[currentDev].hStream));
+    assert(CUDNN_STATUS_SUCCESS == cudnnSetStream(cudnnHandle, devices[currentDev].hStream));
+  }
+
   static void init(bool randTime = false) {
     int devCount = 0;
     CUcontext primaryCtx;
 
-    cuInit(0);
-    cuDeviceGetCount(&devCount);
-    assert(devCount > 0);
-    cuDevicePrimaryCtxRetain(&primaryCtx, 0);
-    cuCtxSetCurrent(primaryCtx);
-    assert(CUDA_SUCCESS == cuStreamCreate(&hStream, 0));
-
-    cublasCreate(&cublasHandle);
-    cublasSetStream_v2(cublasHandle, hStream);
-    cublasSetPointerMode_v2(cublasHandle, CUBLAS_POINTER_MODE_HOST);
-
-    cudnnCreate(&cudnnHandle);
-    cudnnSetStream(cudnnHandle, hStream);
-
     if (randTime)
       srand(time(0));
+
+    assert(CUDA_SUCCESS == cuInit(0));
+    assert(CUDA_SUCCESS == cuDeviceGetCount(&devCount));
+    die_if(devCount <= 0, "No available GPUs detected.");
+
+    devices.resize(devCount);
+
+    for (int i = 0; i < 2; ++i) {
+      assert(CUDA_SUCCESS == cuDevicePrimaryCtxRetain(&devices[i].hContext, i));
+      assert(CUDA_SUCCESS == cuCtxSetCurrent(devices[i].hContext));
+      assert(CUDA_SUCCESS == cuStreamCreate(&devices[i].hStream, CU_STREAM_NON_BLOCKING));
+      assert(CUBLAS_STATUS_SUCCESS == cublasCreate(&devices[i].hCublas));
+      assert(CUBLAS_STATUS_SUCCESS == cublasSetPointerMode_v2(devices[i].hCublas, CUBLAS_POINTER_MODE_HOST));
+      assert(CUDNN_STATUS_SUCCESS == cudnnCreate(&devices[i].hCudnn));
+    }
+
+    activateCurrentDevice(0);
   }
 
   static string stringify_shape(const vector<int> &shape, int offset = 0) {
@@ -168,7 +187,7 @@ public:
 
     assert(sizeof(float) == sizeof(unsigned int));
     unsigned int ui = (unsigned int&)val;
-    assert(CUDA_SUCCESS == cuMemsetD32Async((CUdeviceptr)d_data->get(), ui, len, hStream));
+    assert(CUDA_SUCCESS == cuMemsetD32Async((CUdeviceptr)d_data->get(), ui, len, devices[currentDev].hStream));
   }
 
 
@@ -190,16 +209,16 @@ public:
 
   void set_data(const float *host) const {
     size_t len = count();
-    assert(CUDA_SUCCESS == cuMemcpyHtoDAsync_v2((CUdeviceptr)d_data->get(), host, len * sizeof(float), hStream));
-    assert(CUDA_SUCCESS == cuStreamSynchronize(hStream));
+    assert(CUDA_SUCCESS == cuMemcpyHtoDAsync_v2((CUdeviceptr)d_data->get(), host, len * sizeof(float), devices[currentDev].hStream));
+    assert(CUDA_SUCCESS == cuStreamSynchronize(devices[currentDev].hStream));
   }
 
   vector<float> get_data() const {
     size_t len = count();
     vector<float> host(len);
     if (len > 0) {
-      assert(CUDA_SUCCESS == cuMemcpyDtoHAsync_v2(host.data(), (CUdeviceptr)d_data->get(), len * sizeof(float), hStream));
-      assert(CUDA_SUCCESS == cuStreamSynchronize(hStream));
+      assert(CUDA_SUCCESS == cuMemcpyDtoHAsync_v2(host.data(), (CUdeviceptr)d_data->get(), len * sizeof(float), devices[currentDev].hStream));
+      assert(CUDA_SUCCESS == cuStreamSynchronize(devices[currentDev].hStream));
     }
     return move(host);
   }
@@ -215,7 +234,7 @@ public:
 
   Tensor copy() const {
     Tensor ans(this->shape);
-    assert(CUDA_SUCCESS == cuMemcpyDtoDAsync_v2((CUdeviceptr)ans.d_data->get(), (CUdeviceptr)this->d_data->get(), ans.count() * sizeof(float), hStream));
+    assert(CUDA_SUCCESS == cuMemcpyDtoDAsync_v2((CUdeviceptr)ans.d_data->get(), (CUdeviceptr)this->d_data->get(), ans.count() * sizeof(float), devices[currentDev].hStream));
     return move(ans);
   }
 
@@ -305,7 +324,7 @@ public:
     const Tensor &data_pred = *this;
     assert(data_pred.shape.size() == 2 && data_pred.shape == data_label.shape);
 
-    vector<float> pred_data = data_pred.clip_by_value(_EPSILON, 1.0f - _EPSILON).get_data();
+    vector<float> pred_data = data_pred.clip_by_value(1.0e-7f, 1.0f - 1.0e-7f).get_data();
     vector<float> real_data = data_label.get_data();
 
     float loss = 0.0f;
