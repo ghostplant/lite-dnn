@@ -56,9 +56,10 @@ int main(int argc, char **argv) {
   int batch_size = 64, steps = 50000;
 
   // * Mnist_MLP
-  /*auto gen = array_generator(MNIST_IMAGES, MNIST_LABELS), &val_gen = gen;
+  // auto gen = array_generator(CIFAR10_IMAGES, CIFAR10_LABELS), &val_gen = gen; // gen->save_to_directory("/cifar10");
+  auto gen = image_generator("/cifar10", 32, 32, 1 << 10, 8), &val_gen = gen;
 
-  auto model = make_shared<InputLayer>("image_place_0", gen->channel, gen->height, gen->width)
+  /*auto model = make_shared<InputLayer>("image_place_0", gen->channel, gen->height, gen->width)
     ->then(make_shared<Flatten>())
     ->then(make_shared<Dense>(512))
     ->then(make_shared<Activation>(CUDNN_ACTIVATION_RELU))
@@ -69,9 +70,9 @@ int main(int argc, char **argv) {
     ->compile();*/
 
   // * ImageNet_AlexNet
-  die_if(0 != system("test -e /tmp/CatsAndDogs/.succ || (echo 'Downloading Cats-and-Dogs dataset ..' && curl -L https://github.com/ghostplant/public/releases/download/cats-and-dogs/cats-and-dogs.tar.gz | tar xzvf - -C /tmp >/dev/null && touch /tmp/CatsAndDogs/.succ)"), "Failed to download sample dataset.");
+  /* die_if(0 != system("test -e /tmp/CatsAndDogs/.succ || (echo 'Downloading Cats-and-Dogs dataset ..' && curl -L https://github.com/ghostplant/public/releases/download/cats-and-dogs/cats-and-dogs.tar.gz | tar xzvf - -C /tmp >/dev/null && touch /tmp/CatsAndDogs/.succ)"), "Failed to download sample dataset.");
   auto gen = image_generator("/tmp/CatsAndDogs/train", 224, 224, 2048 * 8, 8),
-         val_gen = image_generator("/tmp/CatsAndDogs/validate", 224, 224, 2048, 1);
+         val_gen = image_generator("/tmp/CatsAndDogs/validate", 224, 224, 2048, 1); */
 
   int ngpus = 1;
 
@@ -81,9 +82,9 @@ int main(int argc, char **argv) {
   for (int i = 0; i < ngpus; ++i) {
     Tensor::activateCurrentDevice(i);
 
-    model_replias[i] = lite_dnn::apps::imagenet_alexnet::
+    model_replias[i] = lite_dnn::apps::cifar10_alexnet::
       create_model("image_place_0", "label_place_0", {gen->channel, gen->height, gen->width}, gen->n_class);
-    model_replias[i]->load_weights_from_file("weights.lw");
+    // model_replias[i]->load_weights_from_file("weights.lw");
 
     optimizors[i] = make_shared<MomentumOptimizor>(model_replias[i], 0.9f);
   }
@@ -100,8 +101,7 @@ int main(int argc, char **argv) {
       unordered_map<string, Tensor> feed_dict = {{"image_place_0", batch_data.images}, {"label_place_0", batch_data.labels}};
 
       predicts[i] = model_replias[i]->predict(feed_dict);
-      auto symbolic_gradients = model_replias[i]->collect_all_gradients(feed_dict);
-      optimizors[i]->apply_updates(symbolic_gradients);
+      optimizors[i]->apply_updates(model_replias[i]->collect_all_gradients(feed_dict));
     }
 
     unsigned long currClock = get_microseconds();
