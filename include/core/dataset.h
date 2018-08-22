@@ -1,4 +1,5 @@
 #include <dirent.h>
+#include <sys/stat.h>
 #include <opencv2/core/core.hpp>
 #include <opencv2/highgui/highgui.hpp>
 #include <opencv2/imgproc/imgproc.hpp>
@@ -34,14 +35,14 @@ auto image_generator(string path, int height = 229, int width = 229, int cache_s
       die_if(root == nullptr, "Cannot open directory of path: %s.", path.c_str());
 
       while ((ep = readdir(root)) != nullptr) {
-        if (!ep->d_name[1] || (ep->d_name[1] == '.' && !ep->d_name[2]))
+        if (!ep->d_name[0] || !strcmp(ep->d_name, ".") || !strcmp(ep->d_name, ".."))
           continue;
         string sub_dir = path + ep->d_name + "/";
         DIR *child = opendir(sub_dir.c_str());
         if (child == nullptr)
           continue;
         while ((ch_ep = readdir(child)) != nullptr) {
-          if (!ch_ep->d_name[1] || (ch_ep->d_name[1] == '.' && !ch_ep->d_name[2]))
+          if (!ch_ep->d_name[0] || !strcmp(ch_ep->d_name, ".") || !strcmp(ch_ep->d_name, ".."))
             continue;
           dict[sub_dir].push_back(ch_ep->d_name);
         }
@@ -58,6 +59,7 @@ auto image_generator(string path, int height = 229, int width = 229, int cache_s
       n_class = keyset.size();
 
       printf("\nTotal %d samples found with %d classes for `file://%s`:\n", samples, n_class, path.c_str());
+      die_if(!samples, "No valid samples found in directory.");
       for (int i = 0; i < n_class; ++i)
         printf("  (*) class %d => %s (%zd samples)\n", i, keyset[i].c_str(), dict[keyset[i]].size());
 
@@ -180,6 +182,46 @@ auto array_generator(const char* images_ubyte, const char* labels_ubyte) {
     vector<float> images_data, labels_data;
     int n_sample, n_class, channel, height, width;
     int curr_iter;
+
+    void save_to_directory(string path) {
+      die_if(channel != 3 && channel != 1, "Not supporting image channel to save (channel = %d).", channel);
+      if (path.back() != '/')
+        path += '/';
+
+      int it = path.find('/', 1);
+      while (it >= 0) {
+        mkdir(path.substr(0, it).c_str(), 0755);
+        it = path.find('/', it + 1);
+      }
+      for (int i = 0; i < n_class; ++i)
+        mkdir((path + to_string(i)).c_str(), 0755);
+
+      int stride = (channel == 3) ? height * width : 0;
+      for (int k = 0; k < n_sample; ++k) {
+        cv::Mat dst(height, width, CV_8UC3, cv::Scalar(0, 0, 0));
+        uint8_t *ptr = dst.data;
+
+        float *offset = images_data.data() + k * channel * height * width;
+        int pred = 0;
+        for (int i = 1; i < n_class; ++i)
+          if (labels_data[k * n_class + i] > labels_data[k * n_class + pred])
+            pred = i;
+        float *r = offset, *g = r + stride, *b = g + stride;
+        for (int i = 0; i < height; ++i) {
+          for (int j = 0; j < width; ++j) {
+            int id = i * width + j;
+            int x = r[id] * 255.0f + 1e-8f;
+            int y = g[id] * 255.0f + 1e-8f;
+            int z = b[id] * 255.0f + 1e-8f;
+            assert(x >= 0 && y >= 0 && z >= 0 && x <= 255 && y <= 255 && z <= 255);
+            *ptr++ = x;
+            *ptr++ = y;
+            *ptr++ = z;
+          }
+        }
+        cv::imwrite(path + to_string(pred) + "/" + to_string(k) + ".jpg", dst);
+      }
+    }
 
     auto next_batch(int batch_size = 32) {
       struct dataset {
