@@ -19,7 +19,7 @@ auto image_generator(string path, int height = 229, int width = 229, int cache_s
     int cache_size;
     vector<pthread_t> tids;
     pthread_mutex_t m_lock;
-    bool thread_stop;
+    bool threadStop;
 
     void *cudaHostPtr;
     ssize_t cudaHostFloatCnt;
@@ -28,7 +28,7 @@ auto image_generator(string path, int height = 229, int width = 229, int cache_s
         cache_size(cache_size), tids(thread_para), cudaHostPtr(nullptr), cudaHostFloatCnt(0LU) {
 
       pthread_mutex_init(&m_lock, 0);
-      thread_stop = 0;
+      threadStop = false;
 
       dirent *ep, *ch_ep;
       DIR *root = opendir(path.c_str());
@@ -64,12 +64,13 @@ auto image_generator(string path, int height = 229, int width = 229, int cache_s
         printf("  (*) class %d => %s (%zd samples)\n", i, keyset[i].c_str(), dict[keyset[i]].size());
 
       for (int i = 0; i < tids.size(); ++i)
-        die_if(0 != pthread_create(&tids[i], NULL, Generator::start, this), "Failed to create intra-threads for data generation.");
+        pthread_create(&tids[i], NULL, Generator::start, this);
+      __sync_add_and_fetch(&activeThread, tids.size());
     }
 
     ~Generator() {
       void *ret;
-      thread_stop = 1;
+      threadStop = true;
       for (auto tid: tids)
         pthread_join(tid, &ret);
       pthread_mutex_destroy(&m_lock);
@@ -95,12 +96,11 @@ auto image_generator(string path, int height = 229, int width = 229, int cache_s
           *b++ = *ptr++ / 255.0f, *g++ = *ptr++ / 255.0f, *r++ = *ptr++ / 255.0f;
         }
       }
-      // cv::imwrite("/tmp/image-0.jpg", dst);
       return true;
     }
 
     void background_generator() {
-      while (!thread_stop) {
+      while (1) {
         vector<float> chw(channel * height * width), l(n_class, 0.0f);
         while (1) {
           int c = rand() % dict.size();
@@ -112,19 +112,21 @@ auto image_generator(string path, int height = 229, int width = 229, int cache_s
             break;
         }
 
-        while (!thread_stop) {
+        while (1) {
+          if (threadStop || globalStop) {
+            __sync_add_and_fetch(&activeThread, -1);
+            return;
+          }
           pthread_mutex_lock(&m_lock);
           if (q_chw.size() >= cache_size) {
             pthread_mutex_unlock(&m_lock);
-            if (thread_stop)
-              return;
             usleep(50000);
-          } else
+          } else {
+            q_chw.push(move(chw)), q_l.push(move(l));
+            pthread_mutex_unlock(&m_lock);
             break;
+          }
         }
-
-        q_chw.push(move(chw)), q_l.push(move(l));
-        pthread_mutex_unlock(&m_lock);
       }
     }
 

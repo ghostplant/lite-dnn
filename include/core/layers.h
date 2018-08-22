@@ -304,7 +304,7 @@ public:
 class Dropout: public Layer {
   cudnnDropoutDescriptor_t dropDesc;
 
-  shared_ptr<DeviceMemory> states, reversed;
+  shared_ptr<Tensor::DeviceMemory> states, reversed;
   size_t states_size, reversed_size;
   uint64_t seed; float drop_prob;
 
@@ -313,7 +313,7 @@ public:
     assert(CUDNN_STATUS_SUCCESS == cudnnCreateDropoutDescriptor(&dropDesc));
     assert(CUDNN_STATUS_SUCCESS == cudnnDropoutGetStatesSize(cudnnHandle, &states_size));
 
-    states = make_shared<DeviceMemory>(states_size);
+    states = make_shared<Tensor::DeviceMemory>(states_size);
     assert(CUDNN_STATUS_SUCCESS == cudnnSetDropoutDescriptor(dropDesc, cudnnHandle, drop_prob, states->get(), states_size, seed));
   }
 
@@ -331,7 +331,7 @@ public:
 
     if (reversed_size == ~0LU || _reversed_size > reversed_size) {
       reversed_size = _reversed_size;
-      reversed = make_shared<DeviceMemory>(reversed_size);
+      reversed = make_shared<Tensor::DeviceMemory>(reversed_size);
     }
 
     Tensor y(xs[0].shape);
@@ -517,7 +517,7 @@ public:
     assert(CUDNN_STATUS_SUCCESS == cudnnGetConvolutionForwardWorkspaceSize(cudnnHandle, xs[0].dataTensor->get(), filterDesc, convDesc,
         y.dataTensor->get(), convalgo, &sizeInBytes));
 
-    DeviceMemory workspace(sizeInBytes);
+    Tensor::DeviceMemory workspace(sizeInBytes);
 
     assert(CUDNN_STATUS_SUCCESS == cudnnConvolutionForward(cudnnHandle, &alpha, xs[0].dataTensor->get(), (float*)xs[0].d_data->get(),
         filterDesc, (float*)w_krnl.d_data->get(), convDesc, convalgo, workspace.get(), sizeInBytes,
@@ -546,7 +546,7 @@ public:
                 cudnnHandle, filterDesc, y.dataTensor->get(), convDesc, x.dataTensor->get(), 
                 dalgo, &sizeInBytes));
 
-    DeviceMemory workspace(sizeInBytes);
+    Tensor::DeviceMemory workspace(sizeInBytes);
 
     Tensor dx({n, c, h, w});
     assert(CUDNN_STATUS_SUCCESS == cudnnConvolutionBackwardData(cudnnHandle, &alpha,
@@ -572,7 +572,7 @@ public:
                 cudnnHandle, x.dataTensor->get(), y.dataTensor->get(), convDesc, filterDesc, 
                 falgo, &sizeInBytes));
 
-    DeviceMemory workspace(sizeInBytes);
+    Tensor::DeviceMemory workspace(sizeInBytes);
 
     float alpha = 1.0f, beta = 0.0f;
     assert(CUDNN_STATUS_SUCCESS == cudnnConvolutionBackwardFilter(cudnnHandle, &alpha,

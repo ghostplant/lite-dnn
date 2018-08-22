@@ -13,7 +13,7 @@
 #undef assert
 #endif
 
-#define die_if(__cond__, __desc__, ...) ({if (__cond__) { printf("  \033[33m[!] <<file %s:%d>> " __desc__ "\033[0m\n\n", __FILE__, __LINE__, ##__VA_ARGS__); fflush(stdout); exit(1);}})
+#define die_if(__cond__, __desc__, ...) ({if (__cond__) { printf("  \033[33m[!] <<file %s:%d>> " __desc__ "\033[0m\n\n", __FILE__, __LINE__, ##__VA_ARGS__); fflush(stdout); Tensor::quit(1);}})
 #define assert(__cond__)  die_if(!(__cond__), "Assertion failed: %s.", #__cond__)
 
 using namespace std;
@@ -30,84 +30,13 @@ static vector<DeviceResources> devices;
 static vector<unordered_map<size_t, vector<void*>>> cached_mem;
 static cudnnHandle_t cudnnHandle;
 static cublasHandle_t cublasHandle;
-static int currentDev;
-
-
-class DeviceMemory {
-  void *d_data;
-  size_t length;
-
-public:
-  DeviceMemory(size_t length): d_data(NULL), length(length) {
-    if (length) {
-      if (cached_mem.size() < devices.size()) cached_mem.resize(devices.size());
-      auto& it = cached_mem[currentDev][length]; if (it.size()) { d_data = it.back(); it.pop_back(); return; }
-      die_if(CUDA_SUCCESS != cuMemAlloc_v2((CUdeviceptr*)&d_data, length), "No more memory to allocate new buffer of size %zd B.", length);
-    }
-  }
-
-  ~DeviceMemory() {
-    if (d_data) {
-      cached_mem[currentDev][length].push_back(d_data); return;
-      assert(CUDA_SUCCESS == cuMemFree_v2((CUdeviceptr)d_data));
-    }
-  }
-
-  void* get() const {
-    return d_data;
-  }
-};
-
-
-class TensorHandler {
-  cudnnTensorDescriptor_t dataTensor;
-
-public:
-  TensorHandler(const vector<int> &shape) {
-    assert(shape.size() <= 4);
-    int dims[4] = {1, 1, 1, 1};
-    for (int i = 0; i < shape.size(); ++i)
-      dims[i] = shape[i];
-    assert(CUDNN_STATUS_SUCCESS == cudnnCreateTensorDescriptor(&dataTensor));
-    assert(CUDNN_STATUS_SUCCESS == cudnnSetTensor4dDescriptor(dataTensor, CUDNN_TENSOR_NCHW, CUDNN_DATA_FLOAT,
-      dims[0], dims[1], dims[2], dims[3]));
-  }
-
-  ~TensorHandler() {
-    assert(CUDNN_STATUS_SUCCESS == cudnnDestroyTensorDescriptor(dataTensor));
-  }
-
-  cudnnTensorDescriptor_t get() const {
-    return dataTensor;
-  }
-};
+static int currentDev, activeThread, globalStop;
 
 
 class Tensor {
 
 public:
-  shared_ptr<DeviceMemory> d_data;
-  shared_ptr<TensorHandler> dataTensor;
-  vector<int> shape;
-  bool trainable;
-
-  static int deviceCount() {
-    return devices.size();
-  }
-
-  static void synchronizeCurrentDevice() {
-    assert(CUDA_SUCCESS == cuStreamSynchronize(devices[currentDev].hStream));
-  }
-  
-  static void activateCurrentDevice(int dev) {
-    assert(dev < devices.size());
-    currentDev = dev;
-    assert(CUDA_SUCCESS == cuCtxSetCurrent(devices[dev].hContext));
-    cublasHandle = devices[dev].hCublas;
-    cudnnHandle = devices[dev].hCudnn;
-    assert(CUBLAS_STATUS_SUCCESS == cublasSetStream_v2(cublasHandle, devices[currentDev].hStream));
-    assert(CUDNN_STATUS_SUCCESS == cudnnSetStream(cudnnHandle, devices[currentDev].hStream));
-  }
+  // Global Tensor Funtions
 
   static void init(bool randTime = false) {
     int devCount = 0;
@@ -133,6 +62,84 @@ public:
 
     activateCurrentDevice(0);
   }
+
+  static void quit(int exitCode = 0) {
+    globalStop = true;
+    while (activeThread)
+      usleep(50000);
+    exit(exitCode);
+  }
+  static int deviceCount() {
+    return devices.size();
+  }
+
+  static void synchronizeCurrentDevice() {
+    assert(CUDA_SUCCESS == cuStreamSynchronize(devices[currentDev].hStream));
+  }
+  
+  static void activateCurrentDevice(int dev) {
+    assert(dev < devices.size());
+    currentDev = dev;
+    assert(CUDA_SUCCESS == cuCtxSetCurrent(devices[dev].hContext));
+    cublasHandle = devices[dev].hCublas;
+    cudnnHandle = devices[dev].hCudnn;
+    assert(CUBLAS_STATUS_SUCCESS == cublasSetStream_v2(cublasHandle, devices[currentDev].hStream));
+    assert(CUDNN_STATUS_SUCCESS == cudnnSetStream(cudnnHandle, devices[currentDev].hStream));
+  }
+
+
+  // DeviceMemory for Tensor
+
+  class DeviceMemory {
+    void *d_data;
+    size_t length;
+
+  public:
+    DeviceMemory(size_t length): d_data(NULL), length(length) {
+      if (length) {
+        if (cached_mem.size() < devices.size()) cached_mem.resize(devices.size());
+        auto& it = cached_mem[currentDev][length]; if (it.size()) { d_data = it.back(); it.pop_back(); return; }
+        die_if(cuMemAlloc_v2((CUdeviceptr*)&d_data, length) != CUDA_SUCCESS, "No more memory to allocate new buffer of size %zd B.", length);
+      }
+    }
+
+    ~DeviceMemory() {
+      if (d_data) {
+        cached_mem[currentDev][length].push_back(d_data); return;
+        die_if(cuMemFree_v2((CUdeviceptr)d_data) != CUDA_SUCCESS, "Failed to free memory buffer: %p.", d_data);
+      }
+    }
+
+    void* get() const {
+      return d_data;
+    }
+  };
+
+
+  // TensorHandler for Tensor
+
+  class TensorHandler {
+    cudnnTensorDescriptor_t dataTensor;
+
+  public:
+    TensorHandler(const vector<int> &shape) {
+      int dims[4] = {1, 1, 1, 1};
+      for (int i = 0; i < shape.size(); ++i)
+        dims[i] = shape[i];
+      assert(CUDNN_STATUS_SUCCESS == cudnnCreateTensorDescriptor(&dataTensor));
+      assert(CUDNN_STATUS_SUCCESS == cudnnSetTensor4dDescriptor(dataTensor, CUDNN_TENSOR_NCHW, CUDNN_DATA_FLOAT,
+        dims[0], dims[1], dims[2], dims[3]));
+    }
+
+    ~TensorHandler() {
+      assert(CUDNN_STATUS_SUCCESS == cudnnDestroyTensorDescriptor(dataTensor));
+    }
+
+    cudnnTensorDescriptor_t get() const {
+      return dataTensor;
+    }
+  };
+
 
   static string stringify_shape(const vector<int> &shape, int offset = 0) {
     string ans = "(";
@@ -351,6 +358,11 @@ public:
     }
     return {loss, acc * 100.0f / tot};
   }
+
+  shared_ptr<DeviceMemory> d_data;
+  shared_ptr<TensorHandler> dataTensor;
+  vector<int> shape;
+  bool trainable;
 };
 
 #endif
