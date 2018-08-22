@@ -56,8 +56,8 @@ int main(int argc, char **argv) {
   int batch_size = 64, steps = 50000;
 
   // * Mnist_MLP
-  // auto gen = array_generator(CIFAR10_IMAGES, CIFAR10_LABELS), &val_gen = gen; // gen->save_to_directory("/cifar10");
-  auto gen = image_generator("/cifar10", 32, 32, 1 << 10, 8), &val_gen = gen;
+  auto gen = array_generator(CIFAR10_IMAGES, CIFAR10_LABELS), &val_gen = gen; // gen->save_to_directory("/cifar10");
+  // auto gen = image_generator("/cifar10", 32, 32, 1 << 10, 8), &val_gen = gen;
 
   /*auto model = make_shared<InputLayer>("image_place_0", gen->channel, gen->height, gen->width)
     ->then(make_shared<Flatten>())
