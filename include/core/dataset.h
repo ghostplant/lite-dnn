@@ -182,6 +182,16 @@ auto array_generator(const char* images_ubyte, const char* labels_ubyte) {
     vector<float> images_data, labels_data;
     int n_sample, n_class, channel, height, width;
     int curr_iter;
+    void *cudaHostPtr;
+    ssize_t cudaHostFloatCnt;
+
+    Generator(): cudaHostPtr(nullptr), cudaHostFloatCnt(0) {
+    }
+
+    ~Generator() {
+      if (cudaHostPtr != nullptr)
+        assert(CUDA_SUCCESS == cuMemFreeHost(cudaHostPtr));
+    }
 
     void save_to_directory(string path) {
       die_if(channel != 3 && channel != 1, "Not supporting image channel to save (channel = %d).", channel);
@@ -239,18 +249,26 @@ auto array_generator(const char* images_ubyte, const char* labels_ubyte) {
       } else {
         curr_iter += batch_size - n_sample;
 
-        vector<float> nchw(batch_size * channel * height * width);
-        vector<float> nl(batch_size * n_class);
+        // vector<float> nchw(batch_size * channel * height * width);
+        // vector<float> nl(batch_size * n_class);
+        ssize_t split = batch_size * channel * height * width, tail = split + batch_size * n_class;
 
-        memcpy(nchw.data(), images_data.data() + index * channel * height * width, sizeof(float) * channel * height * width * (n_sample - index));
-        memcpy(nl.data(), labels_data.data() + index * n_class, sizeof(float) * n_class * (n_sample - index));
+        if (cudaHostFloatCnt < tail) {
+          if (cudaHostPtr != nullptr)
+            assert(CUDA_SUCCESS == cuMemFreeHost(cudaHostPtr));
+          cudaHostFloatCnt = tail;
+          assert(CUDA_SUCCESS == cuMemHostAlloc(&cudaHostPtr, cudaHostFloatCnt * sizeof(float), 0));
+        }
 
-        memcpy(nchw.data() + channel * height * width * (n_sample - index), images_data.data(), sizeof(float) * channel * height * width * curr_iter);
-        memcpy(nl.data() +  n_class * (n_sample - index), labels_data.data(), sizeof(float) * n_class * curr_iter);
+        memcpy(((float*)cudaHostPtr), images_data.data() + index * channel * height * width, sizeof(float) * channel * height * width * (n_sample - index));
+        memcpy(((float*)cudaHostPtr) + split, labels_data.data() + index * n_class, sizeof(float) * n_class * (n_sample - index));
+
+        memcpy(((float*)cudaHostPtr) + channel * height * width * (n_sample - index), images_data.data(), sizeof(float) * channel * height * width * curr_iter);
+        memcpy(((float*)cudaHostPtr) + split +  n_class * (n_sample - index), labels_data.data(), sizeof(float) * n_class * curr_iter);
 
         return dataset({
-          Tensor({batch_size, channel, height, width}, nchw.data()),
-          Tensor({batch_size, n_class}, nl.data())
+          Tensor({batch_size, channel, height, width}, ((float*)cudaHostPtr)),
+          Tensor({batch_size, n_class}, ((float*)cudaHostPtr) + split)
         });
       }
     }
