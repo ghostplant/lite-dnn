@@ -18,7 +18,6 @@
 
 #include <stdio.h>
 #include <string.h>
-#include <assert.h>
 #include <unistd.h>
 #include <sys/time.h>
 
@@ -53,12 +52,14 @@ static inline unsigned long get_microseconds() {
 int main(int argc, char **argv) {
   Tensor::init();
 
-  int ngpus = 4;
+  int ngpus = 1;
   int batch_size = 64, steps = 50000;
 
   // * Mnist_MLP
-  auto gen = array_generator(CIFAR10_IMAGES, CIFAR10_LABELS); // gen->save_to_directory("/cifar10");
-  // auto gen = image_generator("/cifar10", 32, 32, 1 << 12, 12);
+  vector<unique_ptr<NormalGenerator>> gens;
+  for (int i = 0; i < ngpus; ++i)
+    gens.push_back(array_generator(CIFAR10_IMAGES, CIFAR10_LABELS)); // gen->save_to_directory("/cifar10");
+  // auto gen = image_generator("/cifar10", 32, 32, 1 << 11, 8);
 
   /* auto model = make_shared<InputLayer>("image_place_0", gen->channel, gen->height, gen->width)
     ->then(make_shared<Flatten>())
@@ -80,9 +81,9 @@ int main(int argc, char **argv) {
 
   for (int i = 0; i < ngpus; ++i) {
     Tensor::activateCurrentDevice(i);
-
+    auto img_shape = gens[i]->get_shape();
     model_replias[i] = lite_dnn::apps::cifar10_alexnet::
-      create_model("image_place_0", "label_place_0", {gen->channel, gen->height, gen->width}, gen->n_class);
+      create_model("image_place_0", "label_place_0", {img_shape[1], img_shape[2], img_shape[3]}, img_shape[0]);
     // model_replias[i]->load_weights_from_file("weights.lw");
 
     optimizors[i] = make_shared<MomentumOptimizor>(model_replias[i], 0.9f, 0.01f);
@@ -95,7 +96,7 @@ int main(int argc, char **argv) {
     for (int i = 0; i < ngpus; ++i) {
       Tensor::activateCurrentDevice(i);
 
-      auto batch_data = gen->next_batch(batch_size);
+      auto batch_data = gens[i]->next_batch(batch_size);
       unordered_map<string, Tensor> feed_dict = {{"image_place_0", batch_data.images}, {"label_place_0", batch_data.labels}};
 
       auto predicts = model_replias[i]->predict(feed_dict);
@@ -106,7 +107,7 @@ int main(int argc, char **argv) {
     if (currClock >= lastClock + 1000000) {
       int dev = 0;
       Tensor::activateCurrentDevice(dev);
-      auto val_batch_data = gen->next_batch(batch_size);
+      auto val_batch_data = gens[dev]->next_batch(batch_size);
       auto val_predicts = model_replias[dev]->predict({{"image_place_0", val_batch_data.images}});
       auto val_lacc = val_predicts.get_loss_and_accuracy_with(val_batch_data.labels);
 

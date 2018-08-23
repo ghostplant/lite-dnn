@@ -9,12 +9,8 @@
 #include <algorithm>
 
 
-#ifdef assert
-#undef assert
-#endif
-
 #define die_if(__cond__, __desc__, ...) ({if (__cond__) { printf("  \033[33m[!] <<file %s:%d>> " __desc__ "\033[0m\n\n", __FILE__, __LINE__, ##__VA_ARGS__); fflush(stdout); Tensor::quit(1);}})
-#define assert(__cond__)  die_if(!(__cond__), "Assertion failed: %s.", #__cond__)
+#define ensure(__cond__)  die_if(!(__cond__), "Condition checking failed: %s.", #__cond__)
 
 using namespace std;
 
@@ -45,19 +41,19 @@ public:
     if (randTime)
       srand(time(0));
 
-    assert(CUDA_SUCCESS == cuInit(0));
-    assert(CUDA_SUCCESS == cuDeviceGetCount(&devCount));
+    ensure(CUDA_SUCCESS == cuInit(0));
+    ensure(CUDA_SUCCESS == cuDeviceGetCount(&devCount));
     die_if(devCount <= 0, "No available GPUs detected.");
 
     devices.resize(devCount);
 
     for (int i = 0; i < devCount; ++i) {
-      assert(CUDA_SUCCESS == cuDevicePrimaryCtxRetain(&devices[i].hContext, i));
-      assert(CUDA_SUCCESS == cuCtxSetCurrent(devices[i].hContext));
-      assert(CUDA_SUCCESS == cuStreamCreate(&devices[i].hStream, CU_STREAM_NON_BLOCKING));
-      assert(CUBLAS_STATUS_SUCCESS == cublasCreate(&devices[i].hCublas));
-      assert(CUBLAS_STATUS_SUCCESS == cublasSetPointerMode_v2(devices[i].hCublas, CUBLAS_POINTER_MODE_HOST));
-      assert(CUDNN_STATUS_SUCCESS == cudnnCreate(&devices[i].hCudnn));
+      ensure(CUDA_SUCCESS == cuDevicePrimaryCtxRetain(&devices[i].hContext, i));
+      ensure(CUDA_SUCCESS == cuCtxSetCurrent(devices[i].hContext));
+      ensure(CUDA_SUCCESS == cuStreamCreate(&devices[i].hStream, CU_STREAM_NON_BLOCKING));
+      ensure(CUBLAS_STATUS_SUCCESS == cublasCreate(&devices[i].hCublas));
+      ensure(CUBLAS_STATUS_SUCCESS == cublasSetPointerMode_v2(devices[i].hCublas, CUBLAS_POINTER_MODE_HOST));
+      ensure(CUDNN_STATUS_SUCCESS == cudnnCreate(&devices[i].hCudnn));
     }
 
     activateCurrentDevice(0);
@@ -74,17 +70,17 @@ public:
   }
 
   static void synchronizeCurrentDevice() {
-    assert(CUDA_SUCCESS == cuStreamSynchronize(devices[currentDev].hStream));
+    ensure(CUDA_SUCCESS == cuStreamSynchronize(devices[currentDev].hStream));
   }
   
   static void activateCurrentDevice(int dev) {
-    assert(dev < devices.size());
+    ensure(dev < devices.size());
     currentDev = dev;
-    assert(CUDA_SUCCESS == cuCtxSetCurrent(devices[dev].hContext));
+    ensure(CUDA_SUCCESS == cuCtxSetCurrent(devices[dev].hContext));
     cublasHandle = devices[dev].hCublas;
     cudnnHandle = devices[dev].hCudnn;
-    assert(CUBLAS_STATUS_SUCCESS == cublasSetStream_v2(cublasHandle, devices[currentDev].hStream));
-    assert(CUDNN_STATUS_SUCCESS == cudnnSetStream(cudnnHandle, devices[currentDev].hStream));
+    ensure(CUBLAS_STATUS_SUCCESS == cublasSetStream_v2(cublasHandle, devices[currentDev].hStream));
+    ensure(CUDNN_STATUS_SUCCESS == cudnnSetStream(cudnnHandle, devices[currentDev].hStream));
   }
 
 
@@ -126,13 +122,13 @@ public:
       int dims[4] = {1, 1, 1, 1};
       for (int i = 0; i < shape.size(); ++i)
         dims[i] = shape[i];
-      assert(CUDNN_STATUS_SUCCESS == cudnnCreateTensorDescriptor(&dataTensor));
-      assert(CUDNN_STATUS_SUCCESS == cudnnSetTensor4dDescriptor(dataTensor, CUDNN_TENSOR_NCHW, CUDNN_DATA_FLOAT,
+      ensure(CUDNN_STATUS_SUCCESS == cudnnCreateTensorDescriptor(&dataTensor));
+      ensure(CUDNN_STATUS_SUCCESS == cudnnSetTensor4dDescriptor(dataTensor, CUDNN_TENSOR_NCHW, CUDNN_DATA_FLOAT,
         dims[0], dims[1], dims[2], dims[3]));
     }
 
     ~TensorHandler() {
-      assert(CUDNN_STATUS_SUCCESS == cudnnDestroyTensorDescriptor(dataTensor));
+      ensure(CUDNN_STATUS_SUCCESS == cudnnDestroyTensorDescriptor(dataTensor));
     }
 
     cudnnTensorDescriptor_t get() const {
@@ -163,7 +159,7 @@ public:
     float receptive = 0.5f;
     for (int i = 2; i < shape.size(); ++i)
       receptive *= shape[i];
-    assert(shape.size() >= 2);
+    ensure(shape.size() >= 2);
     float limit = sqrt(3.0f / max(1.0f, (shape[0] + shape[1]) * receptive));
     r[i] = rand() * 2.0f * limit / RAND_MAX - limit;
     */
@@ -195,9 +191,9 @@ public:
   Tensor(const vector<int> &shape, const float val) {
     size_t len = setup_tensor(shape);
 
-    assert(sizeof(float) == sizeof(unsigned int));
+    ensure(sizeof(float) == sizeof(unsigned int));
     unsigned int ui = (unsigned int&)val;
-    assert(CUDA_SUCCESS == cuMemsetD32Async((CUdeviceptr)d_data->get(), ui, len, devices[currentDev].hStream));
+    ensure(CUDA_SUCCESS == cuMemsetD32Async((CUdeviceptr)d_data->get(), ui, len, devices[currentDev].hStream));
   }
 
 
@@ -219,16 +215,16 @@ public:
 
   void set_data(const float *host) const {
     size_t len = count();
-    assert(CUDA_SUCCESS == cuMemcpyHtoDAsync_v2((CUdeviceptr)d_data->get(), host, len * sizeof(float), devices[currentDev].hStream));
-    assert(CUDA_SUCCESS == cuStreamSynchronize(devices[currentDev].hStream));
+    ensure(CUDA_SUCCESS == cuMemcpyHtoDAsync_v2((CUdeviceptr)d_data->get(), host, len * sizeof(float), devices[currentDev].hStream));
+    ensure(CUDA_SUCCESS == cuStreamSynchronize(devices[currentDev].hStream));
   }
 
   vector<float> get_data() const {
     size_t len = count();
     vector<float> host(len);
     if (len > 0) {
-      assert(CUDA_SUCCESS == cuMemcpyDtoHAsync_v2(host.data(), (CUdeviceptr)d_data->get(), len * sizeof(float), devices[currentDev].hStream));
-      assert(CUDA_SUCCESS == cuStreamSynchronize(devices[currentDev].hStream));
+      ensure(CUDA_SUCCESS == cuMemcpyDtoHAsync_v2(host.data(), (CUdeviceptr)d_data->get(), len * sizeof(float), devices[currentDev].hStream));
+      ensure(CUDA_SUCCESS == cuStreamSynchronize(devices[currentDev].hStream));
     }
     return move(host);
   }
@@ -238,13 +234,13 @@ public:
     mat.shape = shape;
     mat.dataTensor = make_shared<TensorHandler>(shape);
     if (!weak)
-      assert(mat.count() == count());
+      ensure(mat.count() == count());
     return move(mat);
   }
 
   Tensor copy() const {
     Tensor ans(this->shape);
-    assert(CUDA_SUCCESS == cuMemcpyDtoDAsync_v2((CUdeviceptr)ans.d_data->get(), (CUdeviceptr)this->d_data->get(), ans.count() * sizeof(float), devices[currentDev].hStream));
+    ensure(CUDA_SUCCESS == cuMemcpyDtoDAsync_v2((CUdeviceptr)ans.d_data->get(), (CUdeviceptr)this->d_data->get(), ans.count() * sizeof(float), devices[currentDev].hStream));
     return move(ans);
   }
 
@@ -253,7 +249,7 @@ public:
     const Tensor *A = &that, *B = this;
     bool transposeA = transposeThat, transposeB = transposeThis;
 
-    assert(A->shape.size() == 2 && B->shape.size() == 2);
+    ensure(A->shape.size() == 2 && B->shape.size() == 2);
 
     int ax = A->shape[1], ay = A->shape[0];
     if (transposeA)
@@ -261,12 +257,12 @@ public:
     int bx = B->shape[1], by = B->shape[0];
     if (transposeB)
       swap(bx, by);
-    assert(ay == bx);
+    ensure(ay == bx);
 
     Tensor ans({by, ax});
 
     float alpha = 1.0f, beta = 0.0f;
-    assert(0 == cublasSgemm(cublasHandle,
+    ensure(0 == cublasSgemm(cublasHandle,
                             transposeA ? CUBLAS_OP_T : CUBLAS_OP_N, transposeB ? CUBLAS_OP_T : CUBLAS_OP_N,
                             ax, by, ay, &alpha,
                             (float*)A->d_data->get(), A->shape[1],  // X
@@ -284,25 +280,25 @@ public:
   }
 
   Tensor self_update(const Tensor &that, float alpha = 1.0f, float beta = 0.0f) const {
-    assert(this->shape == that.shape);
-    assert(CUDNN_STATUS_SUCCESS == cudnnTransformTensor(cudnnHandle,
+    ensure(this->shape == that.shape);
+    ensure(CUDNN_STATUS_SUCCESS == cudnnTransformTensor(cudnnHandle,
         &alpha, that.dataTensor->get(), (float*)that.d_data->get(),
         &beta, this->dataTensor->get(), (float*)this->d_data->get()));
     return *this;
   }
 
   Tensor self_add(const Tensor &that, float ceof = 1.0f) const {
-    assert(this->shape == that.shape);
-    assert(CUBLAS_STATUS_SUCCESS == cublasSaxpy(cublasHandle, that.count(), &ceof, (float*)that.d_data->get(), 1, (float*)this->d_data->get(), 1));
+    ensure(this->shape == that.shape);
+    ensure(CUBLAS_STATUS_SUCCESS == cublasSaxpy(cublasHandle, that.count(), &ceof, (float*)that.d_data->get(), 1, (float*)this->d_data->get(), 1));
     return *this;
   }
 
   Tensor add(const Tensor &that, float ceof = 1.0f) const {
-    assert(this->shape == that.shape);
+    ensure(this->shape == that.shape);
     Tensor ans(this->shape, 0.0f);
-    assert(CUBLAS_STATUS_SUCCESS == cublasSaxpy(cublasHandle, count(), &ceof, (float*)this->d_data->get(), 1, (float*)ans.d_data->get(), 1));
+    ensure(CUBLAS_STATUS_SUCCESS == cublasSaxpy(cublasHandle, count(), &ceof, (float*)this->d_data->get(), 1, (float*)ans.d_data->get(), 1));
     // Tensor ans = this->copy();
-    assert(CUBLAS_STATUS_SUCCESS == cublasSaxpy(cublasHandle, count(), &ceof, (float*)that.d_data->get(), 1, (float*)ans.d_data->get(), 1));
+    ensure(CUBLAS_STATUS_SUCCESS == cublasSaxpy(cublasHandle, count(), &ceof, (float*)that.d_data->get(), 1, (float*)ans.d_data->get(), 1));
     return ans;
   }
 
@@ -316,13 +312,13 @@ public:
     cudnnCreateOpTensorDescriptor(&op_desc);
 
     cudnnSetOpTensorDescriptor(op_desc, CUDNN_OP_TENSOR_MAX, CUDNN_DATA_FLOAT, CUDNN_NOT_PROPAGATE_NAN);
-    assert(CUDNN_STATUS_SUCCESS == cudnnOpTensor(cudnnHandle, op_desc,
+    ensure(CUDNN_STATUS_SUCCESS == cudnnOpTensor(cudnnHandle, op_desc,
       &alpha, this->dataTensor->get(), (float*)left.d_data->get(),
       &alpha, this->dataTensor->get(), (float*)this->d_data->get(),
       &beta, this->dataTensor->get(), (float*)interm.d_data->get()));
 
     cudnnSetOpTensorDescriptor(op_desc, CUDNN_OP_TENSOR_MIN, CUDNN_DATA_FLOAT, CUDNN_NOT_PROPAGATE_NAN);
-    assert(CUDNN_STATUS_SUCCESS == cudnnOpTensor(cudnnHandle, op_desc,
+    ensure(CUDNN_STATUS_SUCCESS == cudnnOpTensor(cudnnHandle, op_desc,
       &alpha, this->dataTensor->get(), (float*)right.d_data->get(),
       &alpha, this->dataTensor->get(), (float*)interm.d_data->get(),
       &beta, this->dataTensor->get(), (float*)left.d_data->get()));
@@ -332,7 +328,7 @@ public:
 
   pair<float, float> get_loss_and_accuracy_with(const Tensor &data_label) {
     const Tensor &data_pred = *this;
-    assert(data_pred.shape.size() == 2 && data_pred.shape == data_label.shape);
+    ensure(data_pred.shape.size() == 2 && data_pred.shape == data_label.shape);
 
     vector<float> pred_data = data_pred.clip_by_value(1.0e-7f, 1.0f - 1.0e-7f).get_data();
     vector<float> real_data = data_label.get_data();

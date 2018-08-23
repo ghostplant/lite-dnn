@@ -8,9 +8,20 @@
 
 using std::unordered_map;
 
+class NormalGenerator {
+
+public:
+  struct Dataset {
+    Tensor images, labels;
+  };
+
+  virtual Dataset next_batch(int batch_size) = 0;
+  virtual vector<int> get_shape() = 0;
+};
+
 auto image_generator(string path, int height = 229, int width = 229, int cache_size = 256, int thread_para = 4) {
 
-  struct Generator {
+  struct Generator: public NormalGenerator {
     unordered_map<string, vector<string>> dict;
     vector<string> keyset;
     int n_class, channel, height, width;
@@ -75,7 +86,7 @@ auto image_generator(string path, int height = 229, int width = 229, int cache_s
         pthread_join(tid, &ret);
       pthread_mutex_destroy(&m_lock);
       if (cudaHostPtr != nullptr)
-        assert(CUDA_SUCCESS == cuMemFreeHost(cudaHostPtr));
+        ensure(CUDA_SUCCESS == cuMemFreeHost(cudaHostPtr));
     }
 
 
@@ -135,14 +146,18 @@ auto image_generator(string path, int height = 229, int width = 229, int cache_s
       return NULL;
     }
 
-    auto next_batch(int batch_size = 32) {
+    vector<int> get_shape() {
+      return {n_class, channel, height, width};
+    }
+
+    NormalGenerator::Dataset next_batch(int batch_size) {
       size_t split = batch_size * channel * height * width, tail = split + batch_size * keyset.size();
 
       if (cudaHostFloatCnt < tail) {
         if (cudaHostPtr != nullptr)
-          assert(CUDA_SUCCESS == cuMemFreeHost(cudaHostPtr));
+          ensure(CUDA_SUCCESS == cuMemFreeHost(cudaHostPtr));
         cudaHostFloatCnt = tail;
-        assert(CUDA_SUCCESS == cuMemHostAlloc(&cudaHostPtr, cudaHostFloatCnt * sizeof(float), 0));
+        ensure(CUDA_SUCCESS == cuMemHostAlloc(&cudaHostPtr, cudaHostFloatCnt * sizeof(float), 0));
       }
       // vector<float> nchw(batch_size * channel * height * width);
       // vector<float> nl(batch_size * keyset.size());
@@ -162,11 +177,7 @@ auto image_generator(string path, int height = 229, int width = 229, int cache_s
         pthread_mutex_unlock(&m_lock);
       }
 
-      struct dataset {
-        Tensor images, labels;
-      };
-
-      return dataset({
+      return NormalGenerator::Dataset({
         Tensor({batch_size, channel, height, width}, ((float*)cudaHostPtr)),
         Tensor({batch_size, n_class}, ((float*)cudaHostPtr) + split)
       });
@@ -180,7 +191,7 @@ auto image_generator(string path, int height = 229, int width = 229, int cache_s
 
 auto array_generator(const char* images_ubyte, const char* labels_ubyte) {
 
-  struct Generator {
+  struct Generator: public NormalGenerator {
     vector<float> images_data, labels_data;
     int n_sample, n_class, channel, height, width;
     int curr_iter;
@@ -192,7 +203,7 @@ auto array_generator(const char* images_ubyte, const char* labels_ubyte) {
 
     ~Generator() {
       if (cudaHostPtr != nullptr)
-        assert(CUDA_SUCCESS == cuMemFreeHost(cudaHostPtr));
+        ensure(CUDA_SUCCESS == cuMemFreeHost(cudaHostPtr));
     }
 
     void save_to_directory(string path) {
@@ -225,7 +236,7 @@ auto array_generator(const char* images_ubyte, const char* labels_ubyte) {
             int x = r[id] * 255.0f + 1e-8f;
             int y = g[id] * 255.0f + 1e-8f;
             int z = b[id] * 255.0f + 1e-8f;
-            assert(x >= 0 && y >= 0 && z >= 0 && x <= 255 && y <= 255 && z <= 255);
+            ensure(x >= 0 && y >= 0 && z >= 0 && x <= 255 && y <= 255 && z <= 255);
             *ptr++ = x;
             *ptr++ = y;
             *ptr++ = z;
@@ -235,16 +246,16 @@ auto array_generator(const char* images_ubyte, const char* labels_ubyte) {
       }
     }
 
-    auto next_batch(int batch_size = 32) {
-      struct dataset {
-        Tensor images, labels;
-      };
+    vector<int> get_shape() {
+      return {n_class, channel, height, width};
+    }
 
+    NormalGenerator::Dataset next_batch(int batch_size) {\
       int index = curr_iter;
       if (curr_iter + batch_size <= n_sample) {
         curr_iter += batch_size;
 
-        return dataset({
+        return NormalGenerator::Dataset({
           Tensor({batch_size, channel, height, width}, images_data.data() + index * channel * height * width),
           Tensor({batch_size, n_class}, labels_data.data() + index * n_class)
         });
@@ -257,9 +268,9 @@ auto array_generator(const char* images_ubyte, const char* labels_ubyte) {
 
         if (cudaHostFloatCnt < tail) {
           if (cudaHostPtr != nullptr)
-            assert(CUDA_SUCCESS == cuMemFreeHost(cudaHostPtr));
+            ensure(CUDA_SUCCESS == cuMemFreeHost(cudaHostPtr));
           cudaHostFloatCnt = tail;
-          assert(CUDA_SUCCESS == cuMemHostAlloc(&cudaHostPtr, cudaHostFloatCnt * sizeof(float), 0));
+          ensure(CUDA_SUCCESS == cuMemHostAlloc(&cudaHostPtr, cudaHostFloatCnt * sizeof(float), 0));
         }
 
         memcpy(((float*)cudaHostPtr), images_data.data() + index * channel * height * width, sizeof(float) * channel * height * width * (n_sample - index));
@@ -268,7 +279,7 @@ auto array_generator(const char* images_ubyte, const char* labels_ubyte) {
         memcpy(((float*)cudaHostPtr) + channel * height * width * (n_sample - index), images_data.data(), sizeof(float) * channel * height * width * curr_iter);
         memcpy(((float*)cudaHostPtr) + split +  n_class * (n_sample - index), labels_data.data(), sizeof(float) * n_class * curr_iter);
 
-        return dataset({
+        return NormalGenerator::Dataset({
           Tensor({batch_size, channel, height, width}, ((float*)cudaHostPtr)),
           Tensor({batch_size, n_class}, ((float*)cudaHostPtr) + split)
         });
@@ -279,7 +290,7 @@ auto array_generator(const char* images_ubyte, const char* labels_ubyte) {
   auto ReadNormalDataset = [&](const char* dataset) -> pair<vector<int>, vector<float>> {
     auto read_uint32 = [&](FILE *fp) {
       uint32_t val;
-      assert(fread(&val, sizeof(val), 1, fp) == 1);
+      ensure(fread(&val, sizeof(val), 1, fp) == 1);
       return __builtin_bswap32(val);
     };
 
@@ -297,7 +308,7 @@ auto array_generator(const char* images_ubyte, const char* labels_ubyte) {
 
     if (header == 1) { // output_shape = (N, max(val) + 1),  max(val) <= 255
       vector<uint8_t> raw(length);
-      assert(fread(raw.data(), 1, raw.size(), fp) == raw.size());
+      ensure(fread(raw.data(), 1, raw.size(), fp) == raw.size());
 
       uint32_t width = 0;
       for (int i = 0; i < raw.size(); ++i)
@@ -322,7 +333,7 @@ auto array_generator(const char* images_ubyte, const char* labels_ubyte) {
       vector<float> tensor(length * width);
       vector<uint8_t> raw(width);
       for (int i = 0; i < length; ++i) {
-        assert(fread(raw.data(), 1, raw.size(), fp) == raw.size());
+        ensure(fread(raw.data(), 1, raw.size(), fp) == raw.size());
         for (int j = 0; j < width; ++j)
           tensor[i * width + j] = raw[j] / 255.0f;
       }
@@ -338,7 +349,7 @@ auto array_generator(const char* images_ubyte, const char* labels_ubyte) {
       vector<float> tensor(length * width);
       vector<uint8_t> raw(width);
       for (int i = 0; i < length; ++i) {
-        assert(fread(raw.data(), 1, raw.size(), fp) == raw.size());
+        ensure(fread(raw.data(), 1, raw.size(), fp) == raw.size());
         for (int j = 0; j < width; ++j)
           tensor[i * width + j] = raw[j] / 255.0f;
       }
