@@ -117,10 +117,10 @@ public:
     for (auto &layer: layers) {
       vector<Tensor> xs;
       for (auto it: layer->parents) {
-        assert(ys.count(it.get()) > 0);
+        ensure(ys.count(it.get()) > 0);
         xs.push_back(ys[it.get()]);
       }
-      assert(ys.count(layer) == 0);
+      ensure(ys.count(layer) == 0);
       ys[layer] = layer->forward(xs, feed_dict);
     }
     return ys[top_layer.get()];
@@ -132,7 +132,7 @@ public:
     vector<Tensor> grads;
     for (int i = layers.size() - 1; i >= 0; --i) {
       auto &layer = layers[i];
-      assert(dys.count(layer) > 0);
+      ensure(dys.count(layer) > 0);
 
       auto dxs = layer->backward(dys[layer], feed_dict);
       die_if(dxs.size() != layer->parents.size(), "the size of loss vector doesn't match the number of parent nodes.");
