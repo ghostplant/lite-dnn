@@ -55,10 +55,8 @@ int main(int argc, char **argv) {
   int ngpus = 1;
   int batch_size = 64, steps = 50000;
 
-  // * Mnist_MLP
-  vector<unique_ptr<NormalGenerator>> gens;
-  for (int i = 0; i < ngpus; ++i)
-    gens.push_back(array_generator(CIFAR10_IMAGES, CIFAR10_LABELS)); // gen->save_to_directory("/cifar10");
+  // cifar10: 350 * 64 * 4 images/ sec;
+  auto gen = array_generator(CIFAR10_IMAGES, CIFAR10_LABELS);
   // auto gen = image_generator("/cifar10", 32, 32, 1 << 11, 8);
 
   /* auto model = make_shared<InputLayer>("image_place_0", gen->channel, gen->height, gen->width)
@@ -72,8 +70,8 @@ int main(int argc, char **argv) {
     ->compile(); */
 
   // * ImageNet_AlexNet
-  /* die_if(0 != system("test -e /tmp/CatsAndDogs/.succ || (echo 'Downloading Cats-and-Dogs dataset ..' && curl -L https://github.com/ghostplant/public/releases/download/cats-and-dogs/cats-and-dogs.tar.gz | tar xzvf - -C /tmp >/dev/null && touch /tmp/CatsAndDogs/.succ)"), "Failed to download sample dataset.");
-  auto gen = image_generator("/tmp/CatsAndDogs/train", 224, 224, 2048 * 8, 8),
+  // die_if(0 != system("test -e /tmp/CatsAndDogs/.succ || (echo 'Downloading Cats-and-Dogs dataset ..' && curl -L https://github.com/ghostplant/public/releases/download/cats-and-dogs/cats-and-dogs.tar.gz | tar xzvf - -C /tmp >/dev/null && touch /tmp/CatsAndDogs/.succ)"), "Failed to download sample dataset.");
+  /* auto gen = image_generator("/tmp/CatsAndDogs/train", 224, 224, 2048 * 8, 8),
          val_gen = image_generator("/tmp/CatsAndDogs/validate", 224, 224, 2048, 1); */
 
   vector<shared_ptr<Model>> model_replias(ngpus);
@@ -81,33 +79,69 @@ int main(int argc, char **argv) {
 
   for (int i = 0; i < ngpus; ++i) {
     Tensor::activateCurrentDevice(i);
-    auto img_shape = gens[i]->get_shape();
+    auto img_shape = gen->get_shape();
     model_replias[i] = lite_dnn::apps::cifar10_alexnet::
       create_model("image_place_0", "label_place_0", {img_shape[1], img_shape[2], img_shape[3]}, img_shape[0]);
-    // model_replias[i]->load_weights_from_file("weights.lw");
+    if (i == 0) {
+      Tensor::activateCurrentDevice(0);
+      model_replias[0]->load_weights_from_file("weights.lw");
+    }
 
-    optimizors[i] = make_shared<MomentumOptimizor>(model_replias[i], 0.9f, 0.01f);
+    optimizors[i] = make_shared<SGDOptimizor>(model_replias[i], 0.01f, 0.001f);
   }
 
   unsigned long lastClock = get_microseconds();
 
-  for (int k = 0; k < steps; ++k) {
+  vector<vector<Tensor>> grads(ngpus);
+  Tensor::activateCurrentDevice(0);
+  auto ws = model_replias[0]->collect_all_weights();
+  for (int j = 1; j < ngpus; ++j) {
+    auto wj = model_replias[j]->collect_all_weights();
+    for (int i = 0; i < ws.size(); ++i)
+      ws[i].copyTo(wj[i]);
+  }
+  Tensor::synchronizeCurrentDevice();
 
+  for (int k = 0; k < steps; ++k) {
     for (int i = 0; i < ngpus; ++i) {
       Tensor::activateCurrentDevice(i);
-
-      auto batch_data = gens[i]->next_batch(batch_size);
-      unordered_map<string, Tensor> feed_dict = {{"image_place_0", batch_data.images}, {"label_place_0", batch_data.labels}};
+      auto batch_data = gen->next_batch(batch_size);
+      auto feed_dict = unordered_map<string, Tensor>({{"image_place_0", batch_data.images}, {"label_place_0", batch_data.labels}});
 
       auto predicts = model_replias[i]->predict(feed_dict);
-      optimizors[i]->apply_updates(model_replias[i]->collect_all_gradients(feed_dict));
+      grads[i] = model_replias[i]->collect_all_gradients(feed_dict);
     }
+
+    /* vector<vector<float>> parameters(grads[0].size());
+    for (int j = 0; j < parameters.size(); ++j)
+      parameters[j].resize(grads[0][j].count());
+    for (int i = 0; i < ngpus; ++i) {
+      Tensor::activateCurrentDevice(i);
+      for (int j = 0; j < parameters.size(); ++j) {
+        auto param = grads[i][j].get_data();
+        ensure(param.size() == parameters[j].size());
+        for (int k = 0; k < param.size(); ++k) {
+          parameters[j][k] = parameters[j][k] * i / (i + 1.0f) + param[k] * 1.0f / (i + 1.0f);
+        }
+      }
+    }
+    for (int i = 0; i < ngpus; ++i) {
+      Tensor::activateCurrentDevice(i);
+      for (int j = 0; j < parameters.size(); ++j)
+        grads[i][j].set_data(parameters[j].data());
+    } */
+    for (int i = 0; i < ngpus; ++i) {
+      Tensor::activateCurrentDevice(i);
+      optimizors[i]->apply_updates(grads[i]);
+    }
+
+    Tensor::activateCurrentDevice(0);
 
     unsigned long currClock = get_microseconds();
     if (currClock >= lastClock + 1000000) {
       int dev = 0;
       Tensor::activateCurrentDevice(dev);
-      auto val_batch_data = gens[dev]->next_batch(batch_size);
+      auto val_batch_data = gen->next_batch(batch_size);
       auto val_predicts = model_replias[dev]->predict({{"image_place_0", val_batch_data.images}});
       auto val_lacc = val_predicts.get_loss_and_accuracy_with(val_batch_data.labels);
 
@@ -116,7 +150,8 @@ int main(int argc, char **argv) {
     }
   }
 
-  // model_replias[0]->save_weights_to_file("weights.lw");
+  Tensor::activateCurrentDevice(0);
+  model_replias[0]->save_weights_to_file("weights.lw");
   Tensor::quit();
   return 0;
 }

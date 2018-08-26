@@ -250,7 +250,7 @@ auto array_generator(const char* images_ubyte, const char* labels_ubyte) {
       return {n_class, channel, height, width};
     }
 
-    NormalGenerator::Dataset next_batch(int batch_size) {\
+    NormalGenerator::Dataset next_batch(int batch_size) {
       int index = curr_iter;
       if (curr_iter + batch_size <= n_sample) {
         curr_iter += batch_size;
