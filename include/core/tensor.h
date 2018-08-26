@@ -213,18 +213,20 @@ public:
     return len;
   }
 
-  void set_data(const float *host) const {
+  void set_data(const float *host, bool sync = true) const {
     size_t len = count();
     ensure(CUDA_SUCCESS == cuMemcpyHtoDAsync_v2((CUdeviceptr)d_data->get(), host, len * sizeof(float), devices[currentDev].hStream));
-    ensure(CUDA_SUCCESS == cuStreamSynchronize(devices[currentDev].hStream));
+    if (sync)
+      ensure(CUDA_SUCCESS == cuStreamSynchronize(devices[currentDev].hStream));
   }
 
-  vector<float> get_data() const {
+  vector<float> get_data(bool sync = true) const {
     size_t len = count();
     vector<float> host(len);
     if (len > 0) {
       ensure(CUDA_SUCCESS == cuMemcpyDtoHAsync_v2(host.data(), (CUdeviceptr)d_data->get(), len * sizeof(float), devices[currentDev].hStream));
-      ensure(CUDA_SUCCESS == cuStreamSynchronize(devices[currentDev].hStream));
+      if (sync)
+        ensure(CUDA_SUCCESS == cuStreamSynchronize(devices[currentDev].hStream));
     }
     return move(host);
   }
@@ -238,10 +240,9 @@ public:
     return move(mat);
   }
 
-  Tensor copy() const {
-    Tensor ans(this->shape);
-    ensure(CUDA_SUCCESS == cuMemcpyDtoDAsync_v2((CUdeviceptr)ans.d_data->get(), (CUdeviceptr)this->d_data->get(), ans.count() * sizeof(float), devices[currentDev].hStream));
-    return move(ans);
+  void copyTo(const Tensor &dst) const {
+    die_if(dst.shape != this->shape, "Cannot copy tensor among two tensors with different shapes.");
+    ensure(CUDA_SUCCESS == cuMemcpyDtoDAsync_v2((CUdeviceptr)dst.d_data->get(), (CUdeviceptr)this->d_data->get(), dst.count() * sizeof(float), devices[currentDev].hStream));
   }
 
   Tensor matmul(const Tensor &that, bool transposeThis = false, bool transposeThat = false) const {
@@ -288,9 +289,7 @@ public:
   }
 
   Tensor self_add(const Tensor &that, float ceof = 1.0f) const {
-    ensure(this->shape == that.shape);
-    ensure(CUBLAS_STATUS_SUCCESS == cublasSaxpy(cublasHandle, that.count(), &ceof, (float*)that.d_data->get(), 1, (float*)this->d_data->get(), 1));
-    return *this;
+    return self_update(that, ceof, 1.0f);
   }
 
   Tensor add(const Tensor &that, float ceof = 1.0f) const {
