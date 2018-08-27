@@ -31,6 +31,7 @@
 #include <core/optimizor.h>
 
 #include <core/generator.h>
+#include <core/dataset.h>
 
 #include <apps/resnet50.h>
 #include <apps/alexnet.h>
@@ -55,9 +56,10 @@ int main(int argc, char **argv) {
   int ngpus = 1;
   int batch_size = 64, steps = 50000;
 
-  // cifar10: 350 * 64 * 4 images/ sec;
-  auto gen = array_generator(CIFAR10_IMAGES, CIFAR10_LABELS);
-  // auto gen = image_generator("/cifar10", 32, 32, 1 << 11, 8);
+  auto train_val = load_images("cifar10");
+  // opt: cifar10 = 350 * 64 * 4 images/ sec; file: cifar10 = 300 * 64 * 4 images/ sec
+  // auto gen = array_generator(CIFAR10_IMAGES, CIFAR10_LABELS);
+  auto gen = image_generator(train_val.first, 32, 32, 8);
 
   /* auto model = make_shared<InputLayer>("image_place_0", gen->channel, gen->height, gen->width)
     ->then(make_shared<Flatten>())
@@ -68,11 +70,6 @@ int main(int argc, char **argv) {
     ->then(make_shared<Dense>(gen->n_class))
     ->then(make_shared<SoftmaxCrossEntropy>("label_place_0"))
     ->compile(); */
-
-  // * ImageNet_AlexNet
-  // die_if(0 != system("test -e /tmp/CatsAndDogs/.succ || (echo 'Downloading Cats-and-Dogs dataset ..' && curl -L https://github.com/ghostplant/public/releases/download/cats-and-dogs/cats-and-dogs.tar.gz | tar xzvf - -C /tmp >/dev/null && touch /tmp/CatsAndDogs/.succ)"), "Failed to download sample dataset.");
-  /* auto gen = image_generator("/tmp/CatsAndDogs/train", 224, 224, 2048 * 8, 8),
-         val_gen = image_generator("/tmp/CatsAndDogs/validate", 224, 224, 2048, 1); */
 
   vector<shared_ptr<Model>> model_replias(ngpus);
   vector<shared_ptr<Optimizor>> optimizors(ngpus);

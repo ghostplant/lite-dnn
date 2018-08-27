@@ -19,7 +19,18 @@ public:
   virtual vector<int> get_shape() = 0;
 };
 
-auto image_generator(string path, int height = 229, int width = 229, int cache_size = 256, int thread_para = 4) {
+void make_dirs(const string &path) {
+  die_if(path.back() != '/', "Directory path must end with '/'.");
+  int it = path.find('/', 1);
+  while (it >= 0) {
+    mkdir(path.substr(0, it).c_str(), 0755);
+    it = path.find('/', it + 1);
+  }
+}
+
+
+auto image_generator(string path, int height = 229, int width = 229, int thread_para = 4) {
+  die_if(thread_para > 32, "Too many thread workers for image_generator: %d.\n", thread_para);
 
   struct Generator: public NormalGenerator {
     unordered_map<string, vector<string>> dict;
@@ -27,19 +38,21 @@ auto image_generator(string path, int height = 229, int width = 229, int cache_s
     int n_class, channel, height, width;
     queue<vector<float>> q_chw, q_l;
 
-    int cache_size;
     vector<pthread_t> tids;
     pthread_mutex_t m_lock;
     bool threadStop;
+    int cache_size;
 
     void *cudaHostPtr;
     ssize_t cudaHostFloatCnt;
 
-    Generator(const string &path, int height, int width, int cache_size, int thread_para): height(height), width(width), channel(3),
-        cache_size(cache_size), tids(thread_para), cudaHostPtr(nullptr), cudaHostFloatCnt(0LU) {
+    Generator(const string &path, int height, int width, int thread_para): height(height), width(width), channel(3),
+        tids(thread_para), cudaHostPtr(nullptr), cudaHostFloatCnt(0LU) {
 
       pthread_mutex_init(&m_lock, 0);
       threadStop = false;
+      cache_size = (1U << 30) / (height * width * channel * sizeof(float));
+      cache_size = min(cache_size, (1 << 20));
 
       dirent *ep, *ch_ep;
       DIR *root = opendir(path.c_str());
@@ -186,7 +199,7 @@ auto image_generator(string path, int height = 229, int width = 229, int cache_s
 
   if (path.size() > 0 && path[path.size() - 1] != '/')
     path += '/';
-  return make_unique<Generator>(path, height, width, cache_size, thread_para);
+  return make_unique<Generator>(path, height, width, thread_para);
 }
 
 auto array_generator(const char* images_ubyte, const char* labels_ubyte) {
@@ -211,11 +224,7 @@ auto array_generator(const char* images_ubyte, const char* labels_ubyte) {
       if (path.back() != '/')
         path += '/';
 
-      int it = path.find('/', 1);
-      while (it >= 0) {
-        mkdir(path.substr(0, it).c_str(), 0755);
-        it = path.find('/', it + 1);
-      }
+      make_dirs(path);
       for (int i = 0; i < n_class; ++i)
         mkdir((path + to_string(i)).c_str(), 0755);
 
