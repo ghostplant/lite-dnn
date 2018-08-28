@@ -196,7 +196,7 @@ public:
   vector<Tensor> backward(const Tensor &dy, const unordered_map<string, Tensor> &feed_dict) {
     const Tensor &x = cacheTensors[0], &y = cacheTensors[1];
 
-    Tensor dx = dy;
+    Tensor dx(x.shape);
     float alpha = 1.0f, beta = 0.0f;
     ensure(CUDNN_STATUS_SUCCESS == cudnnActivationBackward(cudnnHandle, activationDesc,
         &alpha, y.dataTensor->get(), (float*)y.d_data->get(), dy.dataTensor->get(), (float*)dy.d_data->get(),
@@ -635,7 +635,7 @@ public:
 
   Tensor forward(const vector<Tensor> &xs, const unordered_map<string, Tensor> &feed_dict) {
     // y = (x - e_mean) / sqrt(e_vari) * bnScale + bnBias
-
+    die_if(false, "batchnorm not supported yet.");
     Tensor y(xs[0].shape);
     float alpha = 1.0f, beta = 0.0f;
     ensure(CUDNN_STATUS_SUCCESS == cudnnBatchNormalizationForwardTraining(cudnnHandle, bnMode,
