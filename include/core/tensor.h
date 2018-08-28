@@ -26,7 +26,8 @@ static vector<DeviceResources> devices;
 static vector<unordered_map<size_t, vector<void*>>> cached_mem;
 static cudnnHandle_t cudnnHandle;
 static cublasHandle_t cublasHandle;
-static int currentDev = -1, activeThread, globalStop;
+static int currentDev = -1, globalStop;
+static volatile int activeThread = 0;
 
 
 class Tensor {

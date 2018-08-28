@@ -67,6 +67,9 @@ int main(int argc, char **argv) {
   auto gen = image_generator(load_images("cifar10").first, 32, 32, 8);
   // auto gen = synthetic_generator(32, 32, 10);
 
+  // auto gen = image_generator(load_images("catsdogs").first, 224, 224, 8);
+  // auto gen = synthetic_generator(224, 224, 2);
+
   vector<shared_ptr<Model>> model_replias(ngpus);
   vector<shared_ptr<Optimizor>> optimizors(ngpus);
 
@@ -80,7 +83,7 @@ int main(int argc, char **argv) {
       model_replias[0]->load_weights_from_file("weights.lw");
     }
 
-    optimizors[i] = make_shared<SGDOptimizor>(model_replias[i], 0.01f, 0.001f);
+    optimizors[i] = make_shared<SGDOptimizor>(model_replias[i], 0.01f, 0.0001f);
   }
 
   unsigned long lastClock = get_microseconds();

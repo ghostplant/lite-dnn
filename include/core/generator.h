@@ -25,6 +25,7 @@ void make_dirs(const string &path) {
   }
 }
 
+
 auto synthetic_generator(int height, int width, int n_class, int channel = 3) {
 
   struct Generator: public NormalGenerator {
@@ -46,6 +47,7 @@ auto synthetic_generator(int height, int width, int n_class, int channel = 3) {
   };
   return make_unique<Generator>(height, width, n_class, channel);
 }
+
 
 auto image_generator(string path, int height = 229, int width = 229, int thread_para = 4) {
   die_if(thread_para > 32, "Too many thread workers for image_generator: %d.\n", thread_para);
@@ -71,8 +73,6 @@ auto image_generator(string path, int height = 229, int width = 229, int thread_
     Generator(const string &path, int height, int width, int thread_para): height(height), width(width), channel(3),
         workers(thread_para), cudaHostPtr(nullptr), cudaHostFloatCnt(0LU) {
 
-      for (int i = 0; i < thread_para; ++i)
-        pthread_mutex_init(&workers[i].m_lock, 0);
       threadStop = false;
       cache_size = (1U << 30) / thread_para / (height * width * channel * sizeof(float));
       cache_size = max(1024, min(cache_size, (1 << 20)));
@@ -111,8 +111,10 @@ auto image_generator(string path, int height = 229, int width = 229, int thread_
         printf("  (*) class %d => %s (%zd samples)\n", i, keyset[i].c_str(), dict[keyset[i]].size());
 
       __sync_add_and_fetch(&activeThread, workers.size());
-      for (int i = 0; i < workers.size(); ++i)
+      for (int i = 0; i < workers.size(); ++i) {
+        pthread_mutex_init(&workers[i].m_lock, 0);
         pthread_create(&workers[i].tid, NULL, Generator::start, new pair<Generator*, int>(this, i));
+      }
     }
 
     ~Generator() {
@@ -177,25 +179,36 @@ auto image_generator(string path, int height = 229, int width = 229, int thread_
       for (int i = 0; i < para; ++i) {
         rest += batch_each + (i < batch_extra);
         while (offset < rest) {
+          vector<vector<float>> f_chw, f_l;
           pthread_mutex_lock(&workers[i].m_lock);
-          while (offset < rest && workers[i].q_chw.size()) {
-            float *images = ((float*)cudaHostPtr) + (channel * height * width) * offset;
-            float *labels = ((float*)cudaHostPtr) + split + (n_class) * offset;
-            memcpy(images, workers[i].q_chw.front().data(), (channel * height * width) * sizeof(float));
-            memcpy(labels, workers[i].q_l.front().data(), (n_class) * sizeof(float));
+          while (f_chw.size() < rest - offset && workers[i].q_chw.size()) {
+            f_chw.push_back(move(workers[i].q_chw.front()));
+            f_l.push_back(move(workers[i].q_l.front()));
             workers[i].q_chw.pop();
             workers[i].q_l.pop();
-            ++offset;
           }
           pthread_mutex_unlock(&workers[i].m_lock);
+
+          while (f_chw.size()) {
+            float *images = ((float*)cudaHostPtr) + (channel * height * width) * offset;
+            float *labels = ((float*)cudaHostPtr) + split + (n_class) * offset;
+            memcpy(images, f_chw.back().data(), (channel * height * width) * sizeof(float));
+            memcpy(labels, f_l.back().data(), (n_class) * sizeof(float));
+            f_chw.pop_back();
+            f_l.pop_back();
+            ++offset;
+          }
         }
       }
       ensure(offset == batch_size);
 
-      return NormalGenerator::Dataset({
-        Tensor({batch_size, channel, height, width}, ((float*)cudaHostPtr)),
-        Tensor({batch_size, n_class}, ((float*)cudaHostPtr) + split)
+      auto ds = NormalGenerator::Dataset({
+        Tensor({batch_size, channel, height, width}),
+        Tensor({batch_size, n_class})
       });
+      ds.images.set_data(((float*)cudaHostPtr), false);
+      ds.labels.set_data(((float*)cudaHostPtr) + split, true);
+      return move(ds);
     }
 
 
