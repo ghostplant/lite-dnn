@@ -16,7 +16,7 @@ auto load_images(const string &images, string cache_path = "/tmp/dataset") {
   make_dirs(cache_path);
   FILE *fp = fopen((cache_path + ".success").c_str(), "rb");
   if (!fp) {
-    printf("Downloading Cats-and-Dogs dataset to '%s'..\n", cache_path.c_str());
+    printf("Downloading source dataset to '%s'..\n", cache_path.c_str());
     die_if(0 != system((string() + "curl -L 'https://github.com/ghostplant/lite-dnn/releases/download/lite-dataset/images-" + images + ".tar.gz' | tar xzvf - -C '" + cache_path + "' >/dev/null").c_str()),
         "Failed to download dataset.");
     die_if((fp = fopen((cache_path + ".success").c_str(), "wb")) == nullptr, "No access to complete saving dataset.");

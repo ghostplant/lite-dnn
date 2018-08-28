@@ -28,6 +28,27 @@ void make_dirs(const string &path) {
   }
 }
 
+auto synthetic_generator(int height, int width, int n_class, int channel = 3) {
+
+  struct Generator: public NormalGenerator {
+    int n_class, channel, height, width;
+
+    Generator(int height, int width, int n_class, int channel): height(height), width(width), n_class(n_class), channel(channel) {
+    }
+
+    NormalGenerator::Dataset next_batch(int batch_size) {
+      return NormalGenerator::Dataset({
+        Tensor({batch_size, channel, height, width}),
+        Tensor({batch_size, n_class})
+      });
+    }
+
+    vector<int> get_shape() {
+      return {n_class, channel, height, width};
+    }
+  };
+  return make_unique<Generator>(height, width, n_class, channel);
+}
 
 auto image_generator(string path, int height = 229, int width = 229, int thread_para = 4) {
   die_if(thread_para > 32, "Too many thread workers for image_generator: %d.\n", thread_para);

@@ -59,13 +59,12 @@ int main(int argc, char **argv) {
     ->then(make_shared<SoftmaxCrossEntropy>("label_place_0"))
     ->compile(); */
 
-  int ngpus = 4;
+  int ngpus = 1;
   int batch_size = 64, steps = 50000;
   DeviceEvents events;
 
-  auto train_val = load_images("cifar10");
-  // opt: cifar10 = 350 * 64 * 4 images/ sec; file: cifar10 = 300 * 64 * 4 images/ sec
-  auto gen = image_generator(train_val.first, 32, 32, 8);
+  auto gen = image_generator(load_images("cifar10").first, 32, 32, 8);
+  // auto gen = synthetic_generator(32, 32, 10);
 
   vector<shared_ptr<Model>> model_replias(ngpus);
   vector<shared_ptr<Optimizor>> optimizors(ngpus);
