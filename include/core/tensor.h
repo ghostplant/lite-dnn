@@ -26,7 +26,7 @@ static vector<DeviceResources> devices;
 static vector<unordered_map<size_t, vector<void*>>> cached_mem;
 static cudnnHandle_t cudnnHandle;
 static cublasHandle_t cublasHandle;
-static int currentDev, activeThread, globalStop;
+static int currentDev = -1, activeThread, globalStop;
 
 
 class Tensor {
@@ -75,6 +75,8 @@ public:
   
   static void activateCurrentDevice(int dev) {
     ensure(dev < devices.size());
+    if (currentDev == dev)
+      return;
     currentDev = dev;
     ensure(CUDA_SUCCESS == cuCtxSetCurrent(devices[dev].hContext));
     cublasHandle = devices[dev].hCublas;
@@ -147,7 +149,8 @@ public:
   }
 
 
-  Tensor(): shape({0}) {
+  Tensor() {
+    setup_tensor({0});
   }
 
   Tensor(const vector<int> &shape, bool random = false) {
@@ -199,8 +202,12 @@ public:
 
   size_t setup_tensor(const vector<int> &shape) {
     this->shape = shape;
-    this->trainable = true;
+    this->device = currentDev;
+
     size_t len = count();
+    if (!len)
+      return len;
+    this->trainable = true;
     d_data = make_shared<DeviceMemory>(len * sizeof(float));
     dataTensor = make_shared<TensorHandler>(shape);
     return len;
@@ -281,11 +288,21 @@ public:
   }
 
   Tensor self_update(const Tensor &that, float alpha = 1.0f, float beta = 0.0f) const {
+    if (fabs(alpha) < 1e-7f) {
+      ensure(CUBLAS_STATUS_SUCCESS == cublasSscal(cublasHandle, count(), &beta, (float*)this->d_data->get(), 1));
+      return *this;
+    }
     ensure(this->shape == that.shape);
     ensure(CUDNN_STATUS_SUCCESS == cudnnTransformTensor(cudnnHandle,
         &alpha, that.dataTensor->get(), (float*)that.d_data->get(),
         &beta, this->dataTensor->get(), (float*)this->d_data->get()));
     return *this;
+  }
+
+  Tensor self_mul(float alpha) const {
+    if (fabs(alpha - 1.0f) < 1e-7f)
+      return *this;
+    return self_update({}, 0.0f, alpha);
   }
 
   Tensor self_add(const Tensor &that, float ceof = 1.0f) const {
@@ -358,6 +375,7 @@ public:
   shared_ptr<TensorHandler> dataTensor;
   vector<int> shape;
   bool trainable;
+  int device;
 };
 
 #endif

@@ -29,6 +29,7 @@
 #include <core/layers.h>
 #include <core/model.h>
 #include <core/optimizor.h>
+#include <core/multidev.h>
 
 #include <core/generator.h>
 #include <core/dataset.h>
@@ -43,25 +44,12 @@ static inline unsigned long get_microseconds() {
   return tv.tv_sec * 1000000LU + tv.tv_usec;
 }
 
-
-#define MNIST_IMAGES "/tmp/mnist-images-idx3-ubyte"
-#define MNIST_LABELS "/tmp/mnist-labels-idx1-ubyte"
-
-#define CIFAR10_IMAGES "/tmp/cifar10-images-idx4-ubyte"
-#define CIFAR10_LABELS "/tmp/cifar10-labels-idx1-ubyte"
-
 int main(int argc, char **argv) {
   Tensor::init();
 
-  int ngpus = 1;
-  int batch_size = 64, steps = 50000;
-
-  auto train_val = load_images("cifar10");
-  // opt: cifar10 = 350 * 64 * 4 images/ sec; file: cifar10 = 300 * 64 * 4 images/ sec
-  // auto gen = array_generator(CIFAR10_IMAGES, CIFAR10_LABELS);
-  auto gen = image_generator(train_val.first, 32, 32, 8);
-
-  /* auto model = make_shared<InputLayer>("image_place_0", gen->channel, gen->height, gen->width)
+  /* 
+  auto gen = array_generator(CIFAR10_IMAGES, CIFAR10_LABELS);
+  auto model = make_shared<InputLayer>("image_place_0", gen->channel, gen->height, gen->width)
     ->then(make_shared<Flatten>())
     ->then(make_shared<Dense>(512))
     ->then(make_shared<Activation>(CUDNN_ACTIVATION_RELU))
@@ -70,6 +58,14 @@ int main(int argc, char **argv) {
     ->then(make_shared<Dense>(gen->n_class))
     ->then(make_shared<SoftmaxCrossEntropy>("label_place_0"))
     ->compile(); */
+
+  int ngpus = 4;
+  int batch_size = 64, steps = 50000;
+  DeviceEvents events;
+
+  auto train_val = load_images("cifar10");
+  // opt: cifar10 = 350 * 64 * 4 images/ sec; file: cifar10 = 300 * 64 * 4 images/ sec
+  auto gen = image_generator(train_val.first, 32, 32, 8);
 
   vector<shared_ptr<Model>> model_replias(ngpus);
   vector<shared_ptr<Optimizor>> optimizors(ngpus);
@@ -84,7 +80,7 @@ int main(int argc, char **argv) {
       model_replias[0]->load_weights_from_file("weights.lw");
     }
 
-    optimizors[i] = make_shared<SGDOptimizor>(model_replias[i], 0.01f, 0.001f);
+    optimizors[i] = make_shared<SGDOptimizor>(model_replias[i], 0.02f, 0.001f);
   }
 
   unsigned long lastClock = get_microseconds();
@@ -99,6 +95,8 @@ int main(int argc, char **argv) {
   }
   Tensor::synchronizeCurrentDevice();
 
+  vector<Tensor> dst;
+
   for (int k = 0; k < steps; ++k) {
     for (int i = 0; i < ngpus; ++i) {
       Tensor::activateCurrentDevice(i);
@@ -108,6 +106,36 @@ int main(int argc, char **argv) {
       auto predicts = model_replias[i]->predict(feed_dict);
       grads[i] = model_replias[i]->collect_all_gradients(feed_dict);
     }
+
+    if (!dst.size()) {
+      dst.resize(grads[0].size());
+      for (int i = 0; i < dst.size(); ++i) {
+        int managed = i % ngpus;
+        Tensor::activateCurrentDevice(managed);
+        dst[i] = Tensor(grads[0][i].shape);
+      }
+    }
+
+    for (int c = 0; c < grads[0].size(); ++c) {
+      int managed = c % ngpus;
+      Tensor::activateCurrentDevice(managed);
+      for (int i = 0; i < ngpus; ++i) {
+        if (i == managed)
+          continue;
+        events.setDependency(managed, i);
+        grads[i][c].copyTo(dst[c]);
+        grads[managed][c].self_add(dst[c]);
+      }
+      grads[managed][c].self_mul(1.0f / ngpus);
+
+      for (int i = 0; i < ngpus; ++i) {
+        if (i == managed)
+          continue;
+        grads[managed][c].copyTo(grads[i][c]);
+        events.setDependency(i, managed);
+      }
+    }
+    events.recycle();
 
     /* vector<vector<float>> parameters(grads[0].size());
     for (int j = 0; j < parameters.size(); ++j)
@@ -127,15 +155,15 @@ int main(int argc, char **argv) {
       for (int j = 0; j < parameters.size(); ++j)
         grads[i][j].set_data(parameters[j].data());
     } */
+
     for (int i = 0; i < ngpus; ++i) {
       Tensor::activateCurrentDevice(i);
       optimizors[i]->apply_updates(grads[i]);
     }
 
-    Tensor::activateCurrentDevice(0);
-
     unsigned long currClock = get_microseconds();
     if (currClock >= lastClock + 1000000) {
+
       int dev = 0;
       Tensor::activateCurrentDevice(dev);
       auto val_batch_data = gen->next_batch(batch_size);
