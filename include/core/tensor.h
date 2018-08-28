@@ -34,12 +34,8 @@ class Tensor {
 public:
   // Global Tensor Funtions
 
-  static void init(bool randTime = false) {
+  static void init() {
     int devCount = 0;
-    CUcontext primaryCtx;
-
-    if (randTime)
-      srand(time(0));
 
     ensure(CUDA_SUCCESS == cuInit(0));
     ensure(CUDA_SUCCESS == cuDeviceGetCount(&devCount));
@@ -173,7 +169,7 @@ public:
     feed = sqrt(2.0f / feed);
 
     auto random_uniform = [&]() {
-      std::default_random_engine generator;
+      std::default_random_engine generator/* (time(0))*/;
       std::normal_distribution<float> normal(0.0f, 1.0f);
 
       vector<float> r(len);

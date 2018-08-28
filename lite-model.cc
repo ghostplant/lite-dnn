@@ -44,6 +44,7 @@ static inline unsigned long get_microseconds() {
   return tv.tv_sec * 1000000LU + tv.tv_usec;
 }
 
+
 int main(int argc, char **argv) {
   Tensor::init();
 
@@ -79,7 +80,7 @@ int main(int argc, char **argv) {
       model_replias[0]->load_weights_from_file("weights.lw");
     }
 
-    optimizors[i] = make_shared<SGDOptimizor>(model_replias[i], 0.02f, 0.001f);
+    optimizors[i] = make_shared<SGDOptimizor>(model_replias[i], 0.01f, 0.001f);
   }
 
   unsigned long lastClock = get_microseconds();
@@ -106,35 +107,37 @@ int main(int argc, char **argv) {
       grads[i] = model_replias[i]->collect_all_gradients(feed_dict);
     }
 
-    if (!dst.size()) {
-      dst.resize(grads[0].size());
-      for (int i = 0; i < dst.size(); ++i) {
-        int managed = i % ngpus;
+    if (ngpus > 1) {
+      if (!dst.size()) {
+        dst.resize(grads[0].size());
+        for (int i = 0; i < dst.size(); ++i) {
+          int managed = i % ngpus;
+          Tensor::activateCurrentDevice(managed);
+          dst[i] = Tensor(grads[0][i].shape);
+        }
+      }
+
+      for (int c = 0; c < grads[0].size(); ++c) {
+        int managed = c % ngpus;
         Tensor::activateCurrentDevice(managed);
-        dst[i] = Tensor(grads[0][i].shape);
-      }
-    }
+        for (int i = 0; i < ngpus; ++i) {
+          if (i == managed)
+            continue;
+          events.setDependency(managed, i);
+          grads[i][c].copyTo(dst[c]);
+          grads[managed][c].self_add(dst[c]);
+        }
+        grads[managed][c].self_mul(1.0f / ngpus);
 
-    for (int c = 0; c < grads[0].size(); ++c) {
-      int managed = c % ngpus;
-      Tensor::activateCurrentDevice(managed);
-      for (int i = 0; i < ngpus; ++i) {
-        if (i == managed)
-          continue;
-        events.setDependency(managed, i);
-        grads[i][c].copyTo(dst[c]);
-        grads[managed][c].self_add(dst[c]);
+        for (int i = 0; i < ngpus; ++i) {
+          if (i == managed)
+            continue;
+          grads[managed][c].copyTo(grads[i][c]);
+          events.setDependency(i, managed);
+        }
       }
-      grads[managed][c].self_mul(1.0f / ngpus);
-
-      for (int i = 0; i < ngpus; ++i) {
-        if (i == managed)
-          continue;
-        grads[managed][c].copyTo(grads[i][c]);
-        events.setDependency(i, managed);
-      }
+      events.recycle();
     }
-    events.recycle();
 
     /* vector<vector<float>> parameters(grads[0].size());
     for (int j = 0; j < parameters.size(); ++j)
@@ -162,7 +165,6 @@ int main(int argc, char **argv) {
 
     unsigned long currClock = get_microseconds();
     if (currClock >= lastClock + 1000000) {
-
       int dev = 0;
       Tensor::activateCurrentDevice(dev);
       auto val_batch_data = gen->next_batch(batch_size);
