@@ -64,7 +64,8 @@ int main(int argc, char **argv) {
   int batch_size = 64, steps = 50000;
   DeviceEvents events;
 
-  auto gen = image_generator(load_images("cifar10").first, 32, 32, 8);
+  auto ds = load_images("cifar10");
+  auto gen = image_generator(ds.first, 32, 32, 8), val_gen = image_generator(ds.second, 32, 32, 1);
   // auto gen = synthetic_generator(32, 32, 10);
 
   // auto gen = image_generator(load_images("catsdogs").first, 224, 224, 8);
@@ -83,7 +84,7 @@ int main(int argc, char **argv) {
       model_replias[0]->load_weights_from_file("weights.lw");
     }
 
-    optimizors[i] = make_shared<SGDOptimizor>(model_replias[i], 0.01f, 0.0001f);
+    optimizors[i] = make_shared<SGDOptimizor>(model_replias[i], 0.01f, 0.0005f);
   }
 
   unsigned long lastClock = get_microseconds();
@@ -170,7 +171,7 @@ int main(int argc, char **argv) {
     if (currClock >= lastClock + 1000000) {
       int dev = 0;
       Tensor::activateCurrentDevice(dev);
-      auto val_batch_data = gen->next_batch(batch_size);
+      auto val_batch_data = val_gen->next_batch(batch_size);
       auto val_predicts = model_replias[dev]->predict({{"image_place_0", val_batch_data.images}});
       auto val_lacc = val_predicts.get_loss_and_accuracy_with(val_batch_data.labels);
 
