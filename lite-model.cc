@@ -60,7 +60,7 @@ int main(int argc, char **argv) {
     ->then(make_shared<SoftmaxCrossEntropy>("label_place_0"))
     ->compile(); */
 
-  int ngpus = 1;
+  int ngpus = Tensor::deviceCount();
   int batch_size = 64, steps = 50000;
   DeviceEvents events;
 
@@ -111,7 +111,8 @@ int main(int argc, char **argv) {
       grads[i] = model_replias[i]->collect_all_gradients(feed_dict);
     }
 
-    if (ngpus > 1) {
+    // Strict sync every 32 mini-batch
+    if ((k + 1) % 32 == 0 && ngpus > 1) {
       if (!dst.size()) {
         dst.resize(grads[0].size());
         for (int i = 0; i < dst.size(); ++i) {
@@ -175,7 +176,7 @@ int main(int argc, char **argv) {
       auto val_predicts = model_replias[dev]->predict({{"image_place_0", val_batch_data.images}});
       auto val_lacc = val_predicts.get_loss_and_accuracy_with(val_batch_data.labels);
 
-      printf("==> step = %d: val_loss = %.4f, val_acc = %.1f%%, time = %.2fs\n", k, val_lacc.first, val_lacc.second, (currClock - lastClock) * 1e-6f);
+      printf("==> step = %d (batch = %d * %d): val_loss = %.4f, val_acc = %.1f%%, time = %.2fs\n", k, batch_size, ngpus, val_lacc.first, val_lacc.second, (currClock - lastClock) * 1e-6f);
       lastClock = currClock;
     }
   }
