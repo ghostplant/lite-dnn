@@ -60,15 +60,13 @@ int main(int argc, char **argv) {
     ->then(make_shared<SoftmaxCrossEntropy>("label_place_0"))
     ->compile(); */
 
-  int ngpus = Tensor::deviceCount();
-  int batch_size = 64, steps = 50000;
+  int ngpus = 1, batch_size = 64, steps = 50000, sync_frequency = 8;
   DeviceEvents events;
 
-  auto ds = load_images("cifar10");
-  auto gen = image_generator(ds.first, 32, 32, 8), val_gen = image_generator(ds.second, 32, 32, 1);
+  // auto ds = load_images("cifar10"); auto gen = image_generator(ds.first, 32, 32, 8), val_gen = image_generator(ds.second, 32, 32, 1);
   // auto gen = synthetic_generator(32, 32, 10);
 
-  // auto gen = image_generator(load_images("catsdogs").first, 224, 224, 8);
+  auto ds = load_images("catsdogs"); auto gen = image_generator(ds.first, 224, 224, 8), val_gen = image_generator(ds.second, 224, 224, 1);
   // auto gen = synthetic_generator(224, 224, 2);
 
   vector<shared_ptr<Model>> model_replias(ngpus);
@@ -77,106 +75,96 @@ int main(int argc, char **argv) {
   for (int i = 0; i < ngpus; ++i) {
     Tensor::activateCurrentDevice(i);
     auto img_shape = gen->get_shape();
-    model_replias[i] = lite_dnn::apps::cifar10_alexnet::
+    model_replias[i] = lite_dnn::apps::imagenet_alexnet::
       create_model("image_place_0", "label_place_0", {img_shape[1], img_shape[2], img_shape[3]}, img_shape[0]);
     if (i == 0) {
       Tensor::activateCurrentDevice(0);
       model_replias[0]->load_weights_from_file("weights.lw");
     }
 
-    optimizors[i] = make_shared<SGDOptimizor>(model_replias[i], 0.01f, 0.0005f);
+    optimizors[i] = make_shared<MomentumOptimizor>(model_replias[i]);
+    // optimizors[i] = make_shared<SGDOptimizor>(model_replias[i], 0.005f);
   }
 
   unsigned long lastClock = get_microseconds();
 
-  vector<vector<Tensor>> grads(ngpus);
+  vector<vector<Tensor>> weights(ngpus);
   Tensor::activateCurrentDevice(0);
-  auto ws = model_replias[0]->collect_all_weights();
+  weights[0] = model_replias[0]->collect_all_weights();
   for (int j = 1; j < ngpus; ++j) {
-    auto wj = model_replias[j]->collect_all_weights();
-    for (int i = 0; i < ws.size(); ++i)
-      ws[i].copyTo(wj[i]);
+    weights[j] = model_replias[j]->collect_all_weights();
+    for (int i = 0; i < weights[0].size(); ++i)
+      weights[0][i].copyTo(weights[j][i]);
   }
   Tensor::synchronizeCurrentDevice();
 
   vector<Tensor> dst;
 
   for (int k = 0; k < steps; ++k) {
+    vector<Tensor> pred_label;
+
     for (int i = 0; i < ngpus; ++i) {
       Tensor::activateCurrentDevice(i);
       auto batch_data = gen->next_batch(batch_size);
       auto feed_dict = unordered_map<string, Tensor>({{"image_place_0", batch_data.images}, {"label_place_0", batch_data.labels}});
 
       auto predicts = model_replias[i]->predict(feed_dict);
-      grads[i] = model_replias[i]->collect_all_gradients(feed_dict);
+      auto grad = model_replias[i]->collect_all_gradients(feed_dict);
+      optimizors[i]->apply_updates(grad);
+
+      if (i == 0)
+        pred_label = { predicts, batch_data.labels };
     }
 
-    // Strict sync every 32 mini-batch
-    if ((k + 1) % 32 == 0 && ngpus > 1) {
+    // Strict sync every after `sync_frequency` times of batch training
+    if ((k + 1) % sync_frequency == 0 && ngpus > 1) {
       if (!dst.size()) {
-        dst.resize(grads[0].size());
+        dst.resize(weights[0].size());
         for (int i = 0; i < dst.size(); ++i) {
           int managed = i % ngpus;
           Tensor::activateCurrentDevice(managed);
-          dst[i] = Tensor(grads[0][i].shape);
+          dst[i] = Tensor(weights[0][i].shape);
         }
       }
 
-      for (int c = 0; c < grads[0].size(); ++c) {
+      for (int c = 0; c < weights[0].size(); ++c) {
         int managed = c % ngpus;
         Tensor::activateCurrentDevice(managed);
         for (int i = 0; i < ngpus; ++i) {
           if (i == managed)
             continue;
           events.setDependency(managed, i);
-          grads[i][c].copyTo(dst[c]);
-          grads[managed][c].self_add(dst[c]);
+          weights[i][c].copyTo(dst[c]);
+          weights[managed][c].self_add(dst[c]);
         }
-        grads[managed][c].self_mul(1.0f / ngpus);
+        weights[managed][c].self_mul(1.0f / ngpus);
 
         for (int i = 0; i < ngpus; ++i) {
           if (i == managed)
             continue;
-          grads[managed][c].copyTo(grads[i][c]);
+          weights[managed][c].copyTo(weights[i][c]);
           events.setDependency(i, managed);
         }
       }
       events.recycle();
     }
 
-    /* vector<vector<float>> parameters(grads[0].size());
-    for (int j = 0; j < parameters.size(); ++j)
-      parameters[j].resize(grads[0][j].count());
-    for (int i = 0; i < ngpus; ++i) {
-      Tensor::activateCurrentDevice(i);
-      for (int j = 0; j < parameters.size(); ++j) {
-        auto param = grads[i][j].get_data();
-        ensure(param.size() == parameters[j].size());
-        for (int k = 0; k < param.size(); ++k) {
-          parameters[j][k] = parameters[j][k] * i / (i + 1.0f) + param[k] * 1.0f / (i + 1.0f);
-        }
-      }
-    }
-    for (int i = 0; i < ngpus; ++i) {
-      Tensor::activateCurrentDevice(i);
-      for (int j = 0; j < parameters.size(); ++j)
-        grads[i][j].set_data(parameters[j].data());
-    } */
-
-    for (int i = 0; i < ngpus; ++i) {
-      Tensor::activateCurrentDevice(i);
-      optimizors[i]->apply_updates(grads[i]);
-    }
+    Tensor::activateCurrentDevice(0);
 
     unsigned long currClock = get_microseconds();
     if (currClock >= lastClock + 1000000) {
-      int dev = 0;
-      Tensor::activateCurrentDevice(dev);
+      static int prev_steps = 0, tot_images = 0, tot_secs = 0;
+      auto lacc = pred_label[0].get_loss_and_accuracy_with(pred_label[1]);
+
       auto val_batch_data = val_gen->next_batch(batch_size);
-      auto val_predicts = model_replias[dev]->predict({{"image_place_0", val_batch_data.images}});
+      auto val_predicts = model_replias[0]->predict({{"image_place_0", val_batch_data.images}});
       auto val_lacc = val_predicts.get_loss_and_accuracy_with(val_batch_data.labels);
 
-      printf("==> step = %d (batch = %d * %d): val_loss = %.4f, val_acc = %.1f%%, time = %.2fs\n", k, batch_size, ngpus, val_lacc.first, val_lacc.second, (currClock - lastClock) * 1e-6f);
+      tot_images += (k - prev_steps) * batch_size * ngpus, tot_secs += 1;
+      prev_steps = k;
+
+      printf("==> step = %d (batch = %d; %.2f images/sec): loss = %.4f, acc = %.1f%%, val_loss = %.4f, val_acc = %.1f%%, time = %.2fs\n",
+          k, batch_size * ngpus, double(tot_images) / tot_secs, lacc.first, lacc.second, val_lacc.first, val_lacc.second, (currClock - lastClock) * 1e-6f);
       lastClock = currClock;
     }
   }
