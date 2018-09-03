@@ -4,7 +4,7 @@
 #include <vector>
 #include <memory>
 #include <unordered_map>
-#include <random>
+// #include <random>
 #include <queue>
 #include <algorithm>
 
@@ -13,6 +13,12 @@
 #define ensure(__cond__)  die_if(!(__cond__), "Condition checking failed: %s.", #__cond__)
 
 using namespace std;
+
+
+static int inline u_rand(unsigned int *seed) {
+  *seed = (*seed * 1103515245 + 12345) & 0x7fffffff;
+  return *seed;
+}
 
 struct DeviceResources {
   CUstream hStream;
@@ -150,32 +156,34 @@ public:
     setup_tensor({0});
   }
 
-  Tensor(const vector<int> &shape, bool random = false) {
+  Tensor(const vector<int> &shape, bool random_fill = false) {
     size_t len = setup_tensor(shape);
 
-    if (!random)
+    if (!random_fill)
       return;
-    /* glorot_normal
-    float receptive = 0.5f;
-    for (int i = 2; i < shape.size(); ++i)
-      receptive *= shape[i];
-    ensure(shape.size() >= 2);
-    float limit = sqrt(3.0f / max(1.0f, (shape[0] + shape[1]) * receptive));
-    r[i] = rand() * 2.0f * limit / RAND_MAX - limit;
-    */
 
-    float feed = 1.0f;
-    for (int i = 1; i < shape.size(); ++i)
-      feed *= shape[i];
-    feed = sqrt(2.0f / feed);
+    int fan_in, fan_out;
+    if (shape.size() == 2)
+      fan_in = shape[0], fan_out = shape[1];
+    else {
+      die_if(shape.size() != 4, "Not supporting random_fill for tensor of dimension = %zd.", shape.size());
+      fan_in = shape[0] * shape[1] * shape[2];
+      fan_out = shape[0] * shape[1] * shape[3];
+    }
+
+    float limit = sqrt(6.0f / (fan_in + fan_out));
 
     auto random_uniform = [&]() {
-      std::default_random_engine generator/* (time(0))*/;
-      std::normal_distribution<float> normal(0.0f, 1.0f);
+      // std::default_random_engine generator(time(0));
+      // std::normal_distribution<float> normal(0.0f, 1.0f);
+      // vector<float> r(len);
+      // for (int i = 0; i < r.size(); ++i)
+      //   r[i] = normal(generator);
 
+      unsigned int seed = len;
       vector<float> r(len);
       for (int i = 0; i < r.size(); ++i)
-        r[i] = normal(generator) * feed;
+        r[i] = (u_rand(&seed) / double(INT_MAX) - 0.5) * 2.0 * limit;
       return move(r);
     };
 

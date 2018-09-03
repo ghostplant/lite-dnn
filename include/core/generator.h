@@ -133,11 +133,11 @@ auto image_generator(string path, int height = 229, int width = 229, int thread_
       while (1) {
         vector<float> chw(channel * height * width), l(n_class, 0.0f);
         while (1) {
-          int c = rand_r(&seed) % dict.size();
+          int c = u_rand(&seed) % dict.size(); // rand_r(&seed)
           auto &files = dict[keyset[c]];
           if (files.size() == 0)
             continue;
-          int it = rand_r(&seed) % files.size();
+          int it = u_rand(&seed) % files.size(); // rand_r(&seed)
           if (get_image_data(keyset[c] + files[it], chw.data(), c, l.data()))
             break;
         }
