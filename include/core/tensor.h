@@ -284,7 +284,7 @@ public:
     return ans;
   }
 
-  float energy() {
+  float energy() const {
     double ans = 0.0;
     auto d = this->get_data();
     for (auto it: d)
