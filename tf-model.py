@@ -2,7 +2,7 @@
 
 import tensorflow as tf
 import numpy as np
-import warnings
+import warnings, time
 
 def warn(*args, **kwargs):
     pass
@@ -21,15 +21,9 @@ label_shapes = (None, 2)
 place_X = tf.placeholder(tf.float32, list(image_shapes))
 place_Y = tf.placeholder(tf.float32, list(label_shapes))
 
-def gen_random(shape):
-  if len(shape) == 2:
-    fan_in, fan_out = shape[0], shape[1]
-  elif len(shape) == 4:
-    fan_in, fan_out = shape[0] * shape[1] * shape[2], shape[0] * shape[1] * shape[3]
-
-  limit = np.sqrt(6.0 / (fan_in + fan_out)) * 2 / float(0x7fffffff)
-
-  # Fill random data matching with lite-model
+def gen_fixed_random(shape, limit):
+  # Fill random data that matches lite-model
+  limit = limit * 2 / float(0x7fffffff)
   count = np.product(shape)
   arr = []
   seed = count
@@ -60,12 +54,16 @@ def energy(val):
   return tot
 
 def init_weight(shape):
-  val = gen_random(shape)
-  return tf.Variable(val)
+  if len(shape) == 2:
+    fan_in, fan_out = shape[0], shape[1]
+  elif len(shape) == 4:
+    fan_in, fan_out = shape[0] * shape[1] * shape[2], shape[0] * shape[1] * shape[3]
+  limit = np.sqrt(6.0 / (fan_in + fan_out))
+  return tf.Variable(tf.random_uniform(shape, -limit, limit))
+  # return tf.Variable(gen_fixed_random(shape, limit))
 
 
 def conv2d(X, filter, ksize, stride, padding):
-  # return tf.pad(X, tf.constant([[0, 0], [0, 0], [padding, padding], [padding, padding]]))
   return tf.nn.conv2d(tf.pad(X, tf.constant([[0, 0], [0, 0], [padding, padding], [padding, padding]])), init_weight([ksize, ksize, int(X.shape[1]), filter]), strides=[1, 1, stride, stride], data_format='NCHW', padding='VALID')
 
 def dense(X, out_channels):
@@ -82,6 +80,7 @@ def flatten(X):
 
 
 def create_imagenet_alexnet(X):
+  print('Creating imagenet_alexnet ..')
   X = conv2d(X, 96, 11, 4, 2)
   X = tf.nn.relu(X)
   X = lrn(X)
@@ -106,6 +105,7 @@ def create_imagenet_alexnet(X):
   X = tf.nn.relu(X)
   X = tf.nn.dropout(X, 0.25)
   X = dense(X, label_shapes[1])
+  return X
 
 
 config = tf.ConfigProto()
@@ -126,8 +126,12 @@ with tf.Session(config=config) as sess:
         rescale=1./255,
         fill_mode='nearest').flow_from_directory('/tmp/dataset/catsdogs/train', target_size=image_shapes[2:], batch_size=batch_size)
 
+  init_time = last_time = time.time()
   for k in range(steps):
     batch_xs, batch_ys = next(gen)
-
-    out_opt, out_loss, out_acc = sess.run([optimizer, loss, accuracy], feed_dict={place_X: batch_xs, place_Y: batch_ys})
-    print('step = %d: loss = %.4f, acc = %d%%' % (k, out_loss, out_acc *1e2))
+    sess.run(optimizer, feed_dict={place_X: batch_xs, place_Y: batch_ys})
+    curr_time = time.time()
+    if curr_time >= last_time + 1.0:
+      out_loss, out_acc = sess.run([loss, accuracy], feed_dict={place_X: batch_xs, place_Y: batch_ys})
+      print('step = %d (batch = %d; %.2f images/sec): loss = %.4f, acc = %.1f%%, time = %.3fs' % (k, batch_size, batch_size * (k + 1) / (curr_time - init_time), out_loss, out_acc *1e2, curr_time - last_time))
+      last_time = curr_time
