@@ -121,17 +121,23 @@ with tf.Session(config=config) as sess:
   sess.run(tf.global_variables_initializer())
 
   from keras.preprocessing.image import ImageDataGenerator
+  from keras.utils import OrderedEnqueuer
   gen = ImageDataGenerator(
         data_format='channels_first',
         rescale=1./255,
         fill_mode='nearest').flow_from_directory('/tmp/dataset/catsdogs/train', target_size=image_shapes[2:], batch_size=batch_size)
+  enqueuer = OrderedEnqueuer(gen, use_multiprocessing=True)
+  enqueuer.start(workers=4)
 
   init_time = last_time = time.time()
-  for k in range(steps):
-    batch_xs, batch_ys = next(gen)
+  k = 1
+  for batch_xs, batch_ys in enqueuer.get():
     sess.run(optimizer, feed_dict={place_X: batch_xs, place_Y: batch_ys})
     curr_time = time.time()
     if curr_time >= last_time + 1.0:
       out_loss, out_acc = sess.run([loss, accuracy], feed_dict={place_X: batch_xs, place_Y: batch_ys})
       print('step = %d (batch = %d; %.2f images/sec): loss = %.4f, acc = %.1f%%, time = %.3fs' % (k, batch_size, batch_size * (k + 1) / (curr_time - init_time), out_loss, out_acc *1e2, curr_time - last_time))
       last_time = curr_time
+    k = k + 1
+    if k > steps:
+      break
