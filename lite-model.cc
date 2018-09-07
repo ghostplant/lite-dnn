@@ -100,7 +100,7 @@ int main(int argc, char **argv) {
 
   vector<Tensor> dst;
 
-  for (int k = 0; k < steps; ++k) {
+  for (int k = 1; k <= steps; ++k) {
     vector<Tensor> pred_label;
 
     for (int i = 0; i < ngpus; ++i) {
@@ -117,7 +117,7 @@ int main(int argc, char **argv) {
     }
 
     // Strict sync every after `sync_frequency` times of batch training
-    if ((k + 1) % sync_frequency == 0 && ngpus > 1) {
+    if (k % sync_frequency == 0 && ngpus > 1) {
       if (!dst.size()) {
         dst.resize(weights[0].size());
         for (int i = 0; i < dst.size(); ++i) {
@@ -152,19 +152,20 @@ int main(int argc, char **argv) {
     Tensor::activateCurrentDevice(0);
 
     unsigned long currClock = get_microseconds();
-    if (currClock >= lastClock + 1000000) {
-      static int prev_steps = 0, tot_images = 0, tot_secs = 0;
+    // if (currClock >= lastClock + 1000000) {
+    if (k % 100 == 0) {
+      static double tot_seconds = 0.0;
       auto lacc = pred_label[0].get_loss_and_accuracy_with(pred_label[1]);
 
       auto val_batch_data = val_gen->next_batch(batch_size);
       auto val_predicts = model_replias[0]->predict({{"image_place_0", val_batch_data.images}});
       auto val_lacc = val_predicts.get_loss_and_accuracy_with(val_batch_data.labels);
 
-      tot_images += (k - prev_steps) * batch_size * ngpus, tot_secs += 1;
-      prev_steps = k;
+      double seconds = (currClock - lastClock) * 1e-6f;
+      tot_seconds += seconds;
 
       printf("==> step = %d (batch = %d; %.2f images/sec): loss = %.4f, acc = %.1f%%, val_loss = %.4f, val_acc = %.1f%%, time = %.2fs\n",
-          k, batch_size * ngpus, double(tot_images) / tot_secs, lacc.first, lacc.second, val_lacc.first, val_lacc.second, (currClock - lastClock) * 1e-6f);
+          k, batch_size * ngpus, k * batch_size / tot_seconds, lacc.first, lacc.second, val_lacc.first, val_lacc.second, seconds);
       lastClock = currClock;
     }
   }

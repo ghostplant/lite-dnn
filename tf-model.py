@@ -134,7 +134,8 @@ with tf.Session(config=config) as sess:
   for batch_xs, batch_ys in enqueuer.get():
     sess.run(optimizer, feed_dict={place_X: batch_xs, place_Y: batch_ys})
     curr_time = time.time()
-    if curr_time >= last_time + 1.0:
+    if k % 100 == 0:
+    # if curr_time >= last_time + 1.0:
       out_loss, out_acc = sess.run([loss, accuracy], feed_dict={place_X: batch_xs, place_Y: batch_ys})
       print('step = %d (batch = %d; %.2f images/sec): loss = %.4f, acc = %.1f%%, time = %.3fs' % (k, batch_size, batch_size * (k + 1) / (curr_time - init_time), out_loss, out_acc *1e2, curr_time - last_time))
       last_time = curr_time
