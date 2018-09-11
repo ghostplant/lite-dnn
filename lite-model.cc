@@ -1,18 +1,18 @@
 /*
   mnist_mlp based on CUBLAS/CUDNN
-  g++ -O3 -std=c++14 "$@" -I/usr/local/cuda/include -L/usr/local/cuda/lib64 -lcuda -lcudart -lcblas -lcudnn
 
   Maintainer: Wei CUI <ghostplant@qq.com>
 
   Benchmark on Nvida Tesla P100:
 
-  ----------------------------------------------------------------------------
-       Model        | batch_size  |    Keras + TF_CUDA    |  Lite-DNN (C++14)
-  ----------------------------------------------------------------------------
-     mnist_mlp      |    32       |    8.34 sec/epoll     |  1.03 sec/epoll
-     mnist_cnn      |    128      |    3.24 sec/epoll     |  1.35 sec/epoll
-     cifar10_lenet  |    128      |    2.68 sec/epoll     |  1.15 sec/epoll
-  ----------------------------------------------------------------------------
+  ---------------------------------------------------------------------------------
+       Model            | batch_size  |    Keras + TF_CUDA    |  Lite-DNN (C++14)
+  ---------------------------------------------------------------------------------
+     mnist_mlp          |    32       |    8.34 sec/epoll     |  1.03 sec/epoll
+     mnist_cnn          |    128      |    3.24 sec/epoll     |  1.35 sec/epoll
+     cifar10_lenet      |    128      |    2.68 sec/epoll     |  1.15 sec/epoll
+     imagenet_resnet50  |    64       |    149.10 images/sec  |  243.22 images/sec
+  ---------------------------------------------------------------------------------
 */
 
 
