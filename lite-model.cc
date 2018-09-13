@@ -165,7 +165,7 @@ int main(int argc, char **argv) {
       tot_seconds += seconds;
 
       printf("==> step = %d (batch = %d; %.2f images/sec): loss = %.4f, acc = %.1f%%, val_loss = %.4f, val_acc = %.1f%%, time = %.2fs\n",
-          k, batch_size * ngpus, k * batch_size / tot_seconds, lacc.first, lacc.second, val_lacc.first, val_lacc.second, seconds);
+          k, batch_size * ngpus, k * ngpus * batch_size / tot_seconds, lacc.first, lacc.second, val_lacc.first, val_lacc.second, seconds);
       lastClock = currClock;
     }
   }
