@@ -41,7 +41,7 @@ class Tensor {
 public:
   // Global Tensor Funtions
 
-  static void init() {
+  static int init() {
     int devCount = 0;
 
     ensure(CUDA_SUCCESS == cuInit(0));
@@ -60,6 +60,7 @@ public:
     }
 
     activateCurrentDevice(0);
+    return devCount;
   }
 
   static void quit(int exitCode = 0) {
@@ -67,9 +68,6 @@ public:
     while (activeThread)
       usleep(50000);
     exit(exitCode);
-  }
-  static int deviceCount() {
-    return devices.size();
   }
 
   static void synchronizeCurrentDevice() {
@@ -229,7 +227,7 @@ public:
     size_t len = count();
     ensure(CUDA_SUCCESS == cuMemcpyHtoDAsync_v2((CUdeviceptr)d_data->get(), host, len * sizeof(float), devices[currentDev].hStream));
     if (sync)
-      ensure(CUDA_SUCCESS == cuStreamSynchronize(devices[currentDev].hStream));
+      synchronizeCurrentDevice();
   }
 
   vector<float> get_data(bool sync = true) const {
@@ -238,7 +236,7 @@ public:
     if (len > 0) {
       ensure(CUDA_SUCCESS == cuMemcpyDtoHAsync_v2(host.data(), (CUdeviceptr)d_data->get(), len * sizeof(float), devices[currentDev].hStream));
       if (sync)
-        ensure(CUDA_SUCCESS == cuStreamSynchronize(devices[currentDev].hStream));
+        synchronizeCurrentDevice();
     }
     return move(host);
   }

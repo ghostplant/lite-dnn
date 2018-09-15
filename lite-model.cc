@@ -37,6 +37,7 @@
 #include <apps/resnet50.h>
 #include <apps/alexnet.h>
 
+#include <nccl.h>
 
 static inline unsigned long get_microseconds() {
   struct timeval tv;
@@ -46,7 +47,12 @@ static inline unsigned long get_microseconds() {
 
 
 int main(int argc, char **argv) {
-  Tensor::init();
+  const int ngpus = Tensor::init();
+
+  int devs[ngpus]; ncclComm_t comms[ngpus];
+  for (int i = 0; i < ngpus; ++i)
+    devs[i] = i;
+  ensure(0 == ncclCommInitAll(comms, ngpus, devs));
 
   /* 
   auto gen = array_generator(CIFAR10_IMAGES, CIFAR10_LABELS);
@@ -60,7 +66,7 @@ int main(int argc, char **argv) {
     ->then(make_shared<SoftmaxCrossEntropy>("label_place_0"))
     ->compile(); */
 
-  int ngpus = 1, batch_size = 64, steps = 50000, sync_frequency = 8;
+  int batch_size = 64, steps = 50000;
   DeviceEvents events;
 
   // auto ds = load_images("cifar10"); auto gen = image_generator(ds.first, 32, 32, 8), val_gen = image_generator(ds.second, 32, 32, 1);
@@ -69,12 +75,14 @@ int main(int argc, char **argv) {
   auto ds = load_images("catsdogs"); auto gen = image_generator(ds.first, 224, 224, 8), val_gen = image_generator(ds.second, 224, 224, 1);
   // auto gen = synthetic_generator(224, 224, 2);
 
+  // auto gen = image_generator("/var/lib/docker/imagenet/train", 224, 224, 8), val_gen = image_generator("/var/lib/docker/imagenet/validate", 224, 224, 1);
+
   vector<shared_ptr<Model>> model_replias(ngpus);
   vector<shared_ptr<Optimizor>> optimizors(ngpus);
 
+  auto img_shape = gen->get_shape();
   for (int i = 0; i < ngpus; ++i) {
     Tensor::activateCurrentDevice(i);
-    auto img_shape = gen->get_shape();
     model_replias[i] = lite_dnn::apps::imagenet_resnet50v1::
       create_model("image_place_0", "label_place_0", {img_shape[1], img_shape[2], img_shape[3]}, img_shape[0]);
     if (i == 0) {
@@ -88,7 +96,7 @@ int main(int argc, char **argv) {
 
   unsigned long lastClock = get_microseconds();
 
-  vector<vector<Tensor>> weights(ngpus);
+  vector<vector<Tensor>> weights(ngpus), grad_reduce(ngpus), grad(ngpus);
   Tensor::activateCurrentDevice(0);
   weights[0] = model_replias[0]->collect_all_weights();
   for (int j = 1; j < ngpus; ++j) {
@@ -98,7 +106,12 @@ int main(int argc, char **argv) {
   }
   Tensor::synchronizeCurrentDevice();
 
-  vector<Tensor> dst;
+  for (int i = 0; i < ngpus; ++i) {
+    Tensor::activateCurrentDevice(i);
+    grad_reduce[i].resize(weights[i].size());
+    for (int j = 0; j < weights[i].size(); ++j)
+      grad_reduce[i][j] = Tensor(weights[i][j].shape);
+  }
 
   for (int k = 1; k <= steps; ++k) {
     vector<Tensor> pred_label;
@@ -109,44 +122,31 @@ int main(int argc, char **argv) {
       auto feed_dict = unordered_map<string, Tensor>({{"image_place_0", batch_data.images}, {"label_place_0", batch_data.labels}});
 
       auto predicts = model_replias[i]->predict(feed_dict);
-      auto grad = model_replias[i]->collect_all_gradients(feed_dict);
-      optimizors[i]->apply_updates(grad);
+      grad[i] = model_replias[i]->collect_all_gradients(feed_dict);
 
       if (i == 0)
         pred_label = { predicts, batch_data.labels };
     }
 
-    // Strict sync every after `sync_frequency` times of batch training
-    if (k % sync_frequency == 0 && ngpus > 1) {
-      if (!dst.size()) {
-        dst.resize(weights[0].size());
-        for (int i = 0; i < dst.size(); ++i) {
-          int managed = i % ngpus;
-          Tensor::activateCurrentDevice(managed);
-          dst[i] = Tensor(weights[0][i].shape);
+    if (ngpus > 1) {
+      // Gradient Reduce Sum
+      ensure(0 == ncclGroupStart());
+      for (int i = 0; i < ngpus; ++i) {
+        Tensor::activateCurrentDevice(i);
+        for (int j = 0; j < grad_reduce[i].size(); ++j) {
+          ensure(0 == ncclAllReduce((const void*)grad[i][j].d_data->get(), (void*)grad_reduce[i][j].d_data->get(), grad_reduce[i][j].count(), ncclFloat, ncclSum, comms[i], devices[currentDev].hStream));
         }
       }
+      ensure(0 == ncclGroupEnd());
+    } else {
+      for (int i = 0; i < ngpus; ++i)
+        for (int j = 0; j < grad_reduce[i].size(); ++j)
+          grad_reduce[i][j] = grad[i][j];
+    }
 
-      for (int c = 0; c < weights[0].size(); ++c) {
-        int managed = c % ngpus;
-        Tensor::activateCurrentDevice(managed);
-        for (int i = 0; i < ngpus; ++i) {
-          if (i == managed)
-            continue;
-          events.setDependency(managed, i);
-          weights[i][c].copyTo(dst[c]);
-          weights[managed][c].self_add(dst[c]);
-        }
-        weights[managed][c].self_mul(1.0f / ngpus);
-
-        for (int i = 0; i < ngpus; ++i) {
-          if (i == managed)
-            continue;
-          weights[managed][c].copyTo(weights[i][c]);
-          events.setDependency(i, managed);
-        }
-      }
-      events.recycle();
+    for (int i = 0; i < ngpus; ++i) {
+      Tensor::activateCurrentDevice(i);
+      optimizors[i]->apply_updates(grad_reduce[i]);
     }
 
     Tensor::activateCurrentDevice(0);
@@ -172,6 +172,9 @@ int main(int argc, char **argv) {
 
   Tensor::activateCurrentDevice(0);
   model_replias[0]->save_weights_to_file("weights.lw");
+
+  for(int i = 0; i < ngpus; ++i)
+    ensure(0 == ncclCommDestroy(comms[i]));
   Tensor::quit();
   return 0;
 }
