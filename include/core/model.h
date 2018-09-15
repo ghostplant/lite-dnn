@@ -31,7 +31,9 @@ public:
         return x->depth < y->depth;
       return index[x] < index[y];
     });
+  }
 
+  void summary() {
     size_t parameter_count = 0;
     putchar('\n');
     for (auto &layer: layers) {

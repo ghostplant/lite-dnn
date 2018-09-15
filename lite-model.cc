@@ -85,8 +85,10 @@ int main(int argc, char **argv) {
     Tensor::activateCurrentDevice(i);
     model_replias[i] = lite_dnn::apps::imagenet_resnet50v1::
       create_model("image_place_0", "label_place_0", {img_shape[1], img_shape[2], img_shape[3]}, img_shape[0]);
+
     if (i == 0) {
       Tensor::activateCurrentDevice(0);
+      model_replias[0]->summary();
       model_replias[0]->load_weights_from_file("weights.lw");
     }
 
