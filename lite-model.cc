@@ -92,8 +92,8 @@ int main(int argc, char **argv) {
       model_replias[0]->load_weights_from_file("weights.lw");
     }
 
-    optimizors[i] = make_shared<MomentumOptimizor>(model_replias[i]);
-    // optimizors[i] = make_shared<SGDOptimizor>(model_replias[i], 0.005f);
+    optimizors[i] = make_shared<MomentumOptimizor>(model_replias[i], 0.9f, 0.01f, 0.001f);
+    // optimizors[i] = make_shared<SGDOptimizor>(model_replias[i], 0.005f, 0.001f);
   }
 
   unsigned long lastClock = get_microseconds();
