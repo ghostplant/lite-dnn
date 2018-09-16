@@ -356,7 +356,7 @@ public:
     for (int i = 0; i < pred_data.size(); ++i) {
       loss -= real_data[i] * log(pred_data[i]) + (1.0f - real_data[i]) * log(1.0f - pred_data[i]);
     }
-    loss /= pred_data.size();
+    loss /= data_pred.shape[0];
 
     int tot = 0, acc = 0;
     for (int i = 0; i < data_pred.shape[0]; ++i) {

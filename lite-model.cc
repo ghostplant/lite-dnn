@@ -155,7 +155,7 @@ int main(int argc, char **argv) {
 
     unsigned long currClock = get_microseconds();
     // if (currClock >= lastClock + 1000000) {
-    if (k % 100 == 0) {
+    if (k % 100 == 0 || k == 1) {
       static double tot_seconds = 0.0;
       auto lacc = pred_label[0].get_loss_and_accuracy_with(pred_label[1]);
 
@@ -170,10 +170,13 @@ int main(int argc, char **argv) {
           k, batch_size * ngpus, k * ngpus * batch_size / tot_seconds, lacc.first, lacc.second, val_lacc.first, val_lacc.second, seconds);
       lastClock = currClock;
     }
-  }
 
-  Tensor::activateCurrentDevice(0);
-  model_replias[0]->save_weights_to_file("weights.lw");
+    if (k % 1000 == 0 || k == steps) {
+      Tensor::activateCurrentDevice(0);
+      printf("Saving model weights ..\n");
+      model_replias[0]->save_weights_to_file("weights.lw");
+    }
+  }
 
   for(int i = 0; i < ngpus; ++i)
     ensure(0 == ncclCommDestroy(comms[i]));
