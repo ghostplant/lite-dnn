@@ -20,6 +20,9 @@ static int inline u_rand(unsigned int *seed) {
   return *seed;
 }
 
+#define rand_uniform_0_1(seed) ((u_rand(seed) + 1.0) / (RAND_MAX + 1.0))
+#define rand_normal_0_1(seed)  sqrt(-2.0 * log(rand_uniform_0_1(seed))) * cos(2.0 * M_PI * rand_uniform_0_1(seed))
+
 struct DeviceResources {
   CUstream hStream;
   CUcontext hContext;
