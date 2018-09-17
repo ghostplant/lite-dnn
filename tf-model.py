@@ -1,14 +1,16 @@
 #!/usr/bin/env python3
 
 import tensorflow as tf
+from tensorflow.python.client import device_lib
 import numpy as np
 import warnings, time
+
 
 def warn(*args, **kwargs):
     pass
 warnings.warn = warn
 
-def u_rand(seed):
+'''def u_rand(seed):
   seed = ((seed & 0x7fffffff) * 1103515245 + 12345) & 0x7fffffff
   return seed
 
@@ -35,7 +37,9 @@ def gen_fixed_random(shape, limit):
           for i3 in range(shape[3]):
             new_val[i0][i1][i2][i3] = val[i0 * stride[0] + i1 * stride[1] + i2 * stride[2] + i3 * stride[3]]
     val = new_val
-  return val
+  return val'''
+
+tf_weights = dict()
 
 def init_weight(shape):
   if len(shape) == 2:
@@ -43,7 +47,13 @@ def init_weight(shape):
   elif len(shape) == 4:
     fan_in, fan_out = shape[0] * shape[1] * shape[2], shape[0] * shape[1] * shape[3]
   limit = np.sqrt(6.0 / (fan_in + fan_out))
-  return tf.Variable(tf.random_uniform(shape, -limit, limit))
+  scope = tf.get_default_graph().get_name_scope()
+  if scope not in tf_weights:
+    tf_weights[scope] = []
+  seed = len(tf_weights[scope])
+  var = tf.Variable(tf.random_uniform(shape, -limit, limit, seed=seed))
+  tf_weights[scope].append(var)
+  return var
   # return tf.Variable(gen_fixed_random(shape, limit))
 
 
@@ -68,37 +78,8 @@ def flatten(X):
   return tf.reshape(X, shape=[-1, np.product(X.shape[1:])])
 
 
-def create_imagenet_alexnet(X, n_classes):
-  print('Creating imagenet_alexnet ..')
-  X = conv2d(X, 96, 11, 4, 2)
-  X = tf.nn.relu(X)
-  X = lrn(X)
-  X = mpool2d(X, 3, 2)
-  X = conv2d(X, 256, 5, 1, 2)
-  X = tf.nn.relu(X)
-  X = lrn(X)
-  X = mpool2d(X, 3, 2)
-  X = conv2d(X, 384, 3, 1, 1)
-  X = lrn(X)
-  X = tf.nn.relu(X)
-  X = conv2d(X, 256, 3, 1, 1)
-  X = tf.nn.relu(X)
-  X = lrn(X)
-  X = mpool2d(X, 3, 2)
-  X = flatten(X)
-
-  X = dense(X, 4096)
-  X = tf.nn.relu(X)
-  X = tf.nn.dropout(X, 0.25)
-  X = dense(X, 4096)
-  X = tf.nn.relu(X)
-  X = tf.nn.dropout(X, 0.25)
-  X = dense(X, n_classes)
-  return X
-
-
 def create_imagenet_resnet50v1(X, n_classes):
-  print('Creating imagenet_resnet50v1 ..')
+  print('Creating imagenet_resnet50v1 on scope `%s`..' % tf.get_default_graph().get_name_scope())
   assert(int(X.shape[2]) == 224 and int(X.shape[3]) == 224 and int(X.shape[1]) == 3)
   X = conv2d(X, 64, 7, 2, 3)
   X = tf.nn.relu(X)
@@ -151,30 +132,63 @@ def create_dataset(data_dir, batch_size=64, height=224, width=224):
     raise Exception("The number of train classes and validate classes must be equal.")
 
   enqueuer = OrderedEnqueuer(gen, use_multiprocessing=False)
-  enqueuer.start(workers=8)
+  enqueuer.start(workers=32)
   val_enqueuer = OrderedEnqueuer(gen, use_multiprocessing=False)
-  val_enqueuer.start(workers=1)
+  val_enqueuer.start(workers=2)
   return enqueuer, val_enqueuer, gen.num_classes, (3, height, width)
 
 
-config = tf.ConfigProto()
-config.gpu_options.allow_growth=True
-
-batch_size, steps = 64, 10000
+batch_size, steps = 64, 1000000
 # data_dir = '/var/lib/docker/imagenet'
 data_dir = '/tmp/dataset/catsdogs'
 
-with tf.Session(config=config) as sess:
+
+config = tf.ConfigProto()
+config.gpu_options.allow_growth = True
+
+def get_available_gpus():
+    local_device_protos = device_lib.list_local_devices()
+    return [x.name for x in local_device_protos if x.device_type == 'GPU']
+
+ngpus = len(get_available_gpus())
+
+with tf.name_scope('tf-scope'), tf.Session(config=config) as sess:
   enqueuer, val_enqueuer, n_classes, image_shape = create_dataset(data_dir=data_dir, batch_size=batch_size)
-  place_X = tf.placeholder(tf.float32, (None,) + image_shape)
-  place_Y = tf.placeholder(tf.float32, (None, n_classes))
 
-  # X = create_imagenet_alexnet(place_X, n_classes)
-  X = create_imagenet_resnet50v1(place_X, n_classes)
+  tower_grads, tower_vars = [], []
+  place_xs, place_ys, opts = [], [], []
+  optimizers = []
+  for i in range(ngpus):
+    with tf.name_scope('gpu_%d' % i), tf.device('/gpu:%d' % i):
+      place_X = tf.placeholder(tf.float32, (None,) + image_shape)
+      place_Y = tf.placeholder(tf.float32, (None, n_classes))
+      # place_X = tf.zeros((batch_size,) + image_shape, dtype=tf.float32)
+      # place_Y = tf.zeros((batch_size, n_classes), dtype=tf.float32)
+      place_xs.append(place_X)
+      place_ys.append(place_Y)
+      X = create_imagenet_resnet50v1(place_X, n_classes)
+      loss = tf.reduce_mean(tf.nn.softmax_cross_entropy_with_logits_v2(logits=X, labels=place_Y))
+      accuracy = tf.reduce_mean(tf.cast(tf.equal(tf.argmax(X, 1), tf.argmax(place_Y, 1)), tf.float32))
+      opt = tf.train.MomentumOptimizer(learning_rate=0.01, momentum=0.9)
+      grad_gv = opt.compute_gradients(loss, tf_weights[tf.get_default_graph().get_name_scope()])
+      grad_g = [g for g, _ in grad_gv]
+      grad_v = [v for _, v in grad_gv]
+      tower_grads.append(grad_g)
+      tower_vars.append(grad_v)
+      opts.append(opt)
 
-  loss = tf.reduce_mean(tf.nn.softmax_cross_entropy_with_logits_v2(logits=X, labels=place_Y))
-  accuracy = tf.reduce_mean(tf.cast(tf.equal(tf.argmax(X, 1), tf.argmax(place_Y, 1)), tf.float32))
-  optimizer = tf.train.MomentumOptimizer(learning_rate=0.001, momentum=0.9).minimize(loss)
+  grad_red = []
+  for it in zip(*tower_grads):
+    all_sum = tf.contrib.nccl.all_sum(it)
+    for i in range(len(all_sum)):
+      all_sum[i] /= ngpus
+    grad_red.append(all_sum)
+
+  grad_gpus = []
+  for i, it in enumerate(zip(*grad_red)):
+    with tf.name_scope('gpu_%d' % i), tf.device('/gpu:%d' % i):
+      grad_sub = zip(list(it), tower_vars[i])
+      optimizers.append(opts[i].apply_gradients(grad_sub))
 
   sess.run(tf.global_variables_initializer())
 
@@ -186,18 +200,34 @@ with tf.Session(config=config) as sess:
   except:
     print('Create new session.')
 
+  # Duplicate Weights
+  keyset = []
+  for k in tf_weights:
+    keyset.append(k)
+  for i in range(1, len(keyset)):
+    left = keyset[i - 1]
+    right = keyset[i]
+    assert(len(tf_weights[left]) == len(tf_weights[right]))
+    for j in range(len(tf_weights[left])):
+      sess.run(tf_weights[right][i].assign(tf_weights[left][i]))
+
   # Start Training
   init_time = last_time = time.time()
   for k in range(1, steps + 1):
-    batch_xs, batch_ys = next(enqueuer.get())
-    sess.run(optimizer, feed_dict={place_X: batch_xs, place_Y: batch_ys})
+    feed_dict = dict()
+    for i in range(ngpus):
+      batch_xs, batch_ys = next(enqueuer.get())
+      if i < len(place_xs):
+        feed_dict[place_xs[i]], feed_dict[place_ys[i]] = batch_xs, batch_ys
+    sess.run(optimizers, feed_dict=feed_dict)
     curr_time = time.time()
     if k % 100 == 0 or k == 1:
       val_xs, val_ys = next(val_enqueuer.get())
       out_loss, out_acc = sess.run([loss, accuracy], feed_dict={place_X: batch_xs, place_Y: batch_ys})
       val_loss, val_acc = sess.run([loss, accuracy], feed_dict={place_X: val_xs, place_Y: val_ys})
-      print('step = %d (batch = %d; %.2f images/sec): loss = %.4f, acc = %.1f%%, val_loss = %.4f, val_acc = %.1f%%, time = %.3fs' %
-        (k, batch_size, batch_size * k / (curr_time - init_time), out_loss, out_acc * 1e2, val_loss, val_acc * 1e2, curr_time - last_time))
+      print('step = %d (batch = %d; %.2f images/sec): loss = %.4f, acc = %.1f%%, val_loss = %.4f, val_acc = %.1f%%, time = %.3fs' % (
+            k, batch_size * ngpus, batch_size * ngpus * k / (curr_time - init_time),
+            out_loss, out_acc * 1e2, val_loss, val_acc * 1e2, curr_time - last_time))
       last_time = curr_time
     if k % 1000 == 0 or k == steps:
       save_path = saver.save(sess, session_ckpt + "/session")
