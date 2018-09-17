@@ -38,6 +38,7 @@
 #include <apps/alexnet.h>
 
 #include <nccl.h>
+#include <mpi.h>
 
 static inline unsigned long get_microseconds() {
   struct timeval tv;
@@ -49,10 +50,27 @@ static inline unsigned long get_microseconds() {
 int main(int argc, char **argv) {
   const int ngpus = Tensor::init();
 
-  int devs[ngpus]; ncclComm_t comms[ngpus];
-  for (int i = 0; i < ngpus; ++i)
-    devs[i] = i;
-  ensure(0 == ncclCommInitAll(comms, ngpus, devs));
+  ensure(MPI_SUCCESS == MPI_Init(&argc, &argv));
+  int mpi_size, mpi_rank;
+  MPI_Comm_size(MPI_COMM_WORLD, &mpi_size);
+  MPI_Comm_rank(MPI_COMM_WORLD, &mpi_rank);
+
+  ncclComm_t comms[ngpus];
+  ncclUniqueId id;
+  if (mpi_rank == 0)
+    ncclGetUniqueId(&id);
+  MPI_Bcast((void *)&id, sizeof(id), MPI_BYTE, 0, MPI_COMM_WORLD);
+
+  ensure(0 == ncclGroupStart());
+  for (int i = 0; i < ngpus; ++i) {
+    ensure(0 == cudaSetDevice(i));
+    ensure(0 == ncclCommInitRank(comms + i, mpi_size * ngpus, id, mpi_rank * ngpus + i));
+  }
+  ensure(0 == ncclGroupEnd());
+  ensure(0 == cudaSetDevice(0));
+
+  // For single-host apps
+  // int devs[ngpus]; for (int i = 0; i < ngpus; ++i) devs[i] = i; ensure(0 == ncclCommInitAll(comms, ngpus, devs));
 
   /* 
   auto gen = array_generator(CIFAR10_IMAGES, CIFAR10_LABELS);
@@ -88,15 +106,14 @@ int main(int argc, char **argv) {
 
     if (i == 0) {
       Tensor::activateCurrentDevice(0);
-      model_replias[0]->summary();
+      if (mpi_rank == 0)
+        model_replias[0]->summary();
       model_replias[0]->load_weights_from_file("weights.lw");
     }
 
-    optimizors[i] = make_shared<MomentumOptimizor>(model_replias[i], 0.9f, 0.01f, 0.001f);
-    // optimizors[i] = make_shared<SGDOptimizor>(model_replias[i], 0.005f, 0.001f);
+    optimizors[i] = make_shared<MomentumOptimizor>(model_replias[i], 0.9f, 0.01f / ngpus / mpi_size, 0.001f);
+    // optimizors[i] = make_shared<SGDOptimizor>(model_replias[i], 0.005f / ngpus / mpi_size, 0.001f);
   }
-
-  unsigned long lastClock = get_microseconds();
 
   vector<vector<Tensor>> weights(ngpus), grad_reduce(ngpus), grad(ngpus);
   Tensor::activateCurrentDevice(0);
@@ -114,6 +131,9 @@ int main(int argc, char **argv) {
     for (int j = 0; j < weights[i].size(); ++j)
       grad_reduce[i][j] = Tensor(weights[i][j].shape);
   }
+
+
+  long lastClock = get_microseconds(), last_k = 0;
 
   for (int k = 1; k <= steps; ++k) {
     vector<Tensor> pred_label;
@@ -153,25 +173,28 @@ int main(int argc, char **argv) {
 
     Tensor::activateCurrentDevice(0);
 
-    unsigned long currClock = get_microseconds();
-    // if (currClock >= lastClock + 1000000) {
-    if (k % 100 == 0 || k == 1) {
-      static double tot_seconds = 0.0;
+    if (mpi_rank != 0)
+      continue;
+
+    long total_batch = batch_size * ngpus * mpi_size, metric_frequency = 50, save_frequency = 1000;
+    long currClock = get_microseconds();
+
+    if (k % metric_frequency == 0 || k == 1) {
       auto lacc = pred_label[0].get_loss_and_accuracy_with(pred_label[1]);
 
       auto val_batch_data = val_gen->next_batch(batch_size);
       auto val_predicts = model_replias[0]->predict({{"image_place_0", val_batch_data.images}});
       auto val_lacc = val_predicts.get_loss_and_accuracy_with(val_batch_data.labels);
 
-      double seconds = (currClock - lastClock) * 1e-6f;
-      tot_seconds += seconds;
+      double during = (currClock - lastClock) * 1e-6f;
 
-      printf("==> step = %d (batch = %d; %.2f images/sec): loss = %.4f, acc = %.1f%%, val_loss = %.4f, val_acc = %.1f%%, time = %.2fs\n",
-          k, batch_size * ngpus, k * ngpus * batch_size / tot_seconds, lacc.first, lacc.second, val_lacc.first, val_lacc.second, seconds);
-      lastClock = currClock;
+      printf("==> step = %d (batch = %ld; %.2lf images/sec): loss = %.4f, acc = %.2f%%, val_loss = %.4f, val_acc = %.2f%%, during = %.2fs\n",
+          k, total_batch, (k - last_k) * total_batch / during, lacc.first, lacc.second, val_lacc.first, val_lacc.second, during);
+
+      lastClock = currClock, last_k = k;
     }
 
-    if (k % 1000 == 0 || k == steps) {
+    if (k % save_frequency == 0 || k == steps) {
       Tensor::activateCurrentDevice(0);
       printf("Saving model weights ..\n");
       model_replias[0]->save_weights_to_file("weights.lw");
@@ -180,6 +203,8 @@ int main(int argc, char **argv) {
 
   for(int i = 0; i < ngpus; ++i)
     ensure(0 == ncclCommDestroy(comms[i]));
+
+  MPI_Finalize();
   Tensor::quit();
   return 0;
 }

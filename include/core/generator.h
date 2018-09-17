@@ -129,7 +129,13 @@ auto image_generator(string path, int height = 229, int width = 229, int thread_
 
 
     void background_generator(int rank) {
-      unsigned int seed = rank;
+      unsigned int seed = rank, mpi_rank = 0;
+      const char *mpi_rank_env = getenv("OMPI_COMM_WORLD_RANK");
+      if (mpi_rank_env)
+        mpi_rank = atoi(mpi_rank_env);
+      seed ^= mpi_rank << 16;
+      // printf("Generating with seed: %u\n", seed);
+
       while (1) {
         vector<float> chw(channel * height * width), l(n_class, 0.0f);
         while (1) {
