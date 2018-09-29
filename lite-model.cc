@@ -111,8 +111,8 @@ int main(int argc, char **argv) {
       model_replias[0]->load_weights_from_file("weights.lw");
     }
 
-    optimizors[i] = make_shared<MomentumOptimizor>(model_replias[i], 0.9f, 0.01f / ngpus / mpi_size, 0.001f);
-    // optimizors[i] = make_shared<SGDOptimizor>(model_replias[i], 0.005f / ngpus / mpi_size, 0.001f);
+    optimizors[i] = make_shared<MomentumOptimizor>(model_replias[i], 0.9f, 0.01f, 0.001f);
+    // optimizors[i] = make_shared<SGDOptimizor>(model_replias[i], 0.01f, 0.001f);
   }
 
   vector<vector<Tensor>> weights(ngpus), grad_reduce(ngpus), grad(ngpus);
@@ -133,6 +133,7 @@ int main(int argc, char **argv) {
   }
 
   long lastClock = get_microseconds(), last_k = 0;
+  float avg_ceof = 1.0f / (ngpus * mpi_size);
 
   for (int k = 1; k <= steps; ++k) {
     vector<Tensor> pred_label;
@@ -145,25 +146,21 @@ int main(int argc, char **argv) {
       auto predicts = model_replias[i]->predict(feed_dict);
       grad[i] = model_replias[i]->collect_all_gradients(feed_dict);
 
+      for (int j = 0; j < grad[i].size(); ++j)
+        grad[i][j].self_mul(avg_ceof);
+
       if (i == 0)
         pred_label = { predicts, batch_data.labels };
     }
 
-    if (ngpus > 1) {
-      // Gradient Reduce Sum
-      ensure(0 == ncclGroupStart());
-      for (int i = 0; i < ngpus; ++i) {
-        Tensor::activateCurrentDevice(i);
-        for (int j = 0; j < grad_reduce[i].size(); ++j) {
-          ensure(0 == ncclAllReduce((const void*)grad[i][j].d_data->get(), (void*)grad_reduce[i][j].d_data->get(), grad_reduce[i][j].count(), ncclFloat, ncclSum, comms[i], devices[currentDev].hStream));
-        }
+    ensure(0 == ncclGroupStart());
+    for (int i = 0; i < ngpus; ++i) {
+      Tensor::activateCurrentDevice(i);
+      for (int j = 0; j < grad_reduce[i].size(); ++j) {
+        ensure(0 == ncclAllReduce((const void*)grad[i][j].d_data->get(), (void*)grad_reduce[i][j].d_data->get(), grad_reduce[i][j].count(), ncclFloat, ncclSum, comms[i], devices[currentDev].hStream));
       }
-      ensure(0 == ncclGroupEnd());
-    } else {
-      for (int i = 0; i < ngpus; ++i)
-        for (int j = 0; j < grad_reduce[i].size(); ++j)
-          grad_reduce[i][j] = grad[i][j];
     }
+    ensure(0 == ncclGroupEnd());
 
     for (int i = 0; i < ngpus; ++i) {
       Tensor::activateCurrentDevice(i);
