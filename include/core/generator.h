@@ -5,6 +5,63 @@
 #include <opencv2/imgproc/imgproc.hpp>
 #include <queue>
 
+
+class MemoryManager {
+
+  void* (*mem_alloc)(size_t);
+  void (*mem_free)(void*);
+
+  unordered_map<unsigned int, vector<void*>> resources;
+  unordered_map<void*, unsigned int> buffsize;
+
+public:
+  MemoryManager(void* (*mem_alloc)(size_t), void (*mem_free)(void*)) {
+    this->mem_alloc = mem_alloc;
+    this->mem_free = mem_free;
+  }
+
+  ~MemoryManager() {
+    clear();
+  }
+
+  void clear() {
+    for (auto &it: resources)
+      for (auto &ptr: it.second)
+        mem_free(ptr);
+    resources.clear();
+    buffsize.clear();
+  }
+
+  void* allocate(unsigned int floatCnt) {
+    ensure(floatCnt > 0);
+    --floatCnt;
+    floatCnt |= floatCnt >> 1;
+    floatCnt |= floatCnt >> 2;
+    floatCnt |= floatCnt >> 4;
+    floatCnt |= floatCnt >> 8;
+    floatCnt |= floatCnt >> 16;
+    ++floatCnt;
+
+    void *memptr;
+    auto it = resources.find(floatCnt);
+    if (it != resources.end() && it->second.size() > 0) {
+      memptr = it->second.back();
+      it->second.pop_back();
+    } else {
+      memptr = mem_alloc(size_t(floatCnt) * sizeof(float));
+      buffsize[memptr] = floatCnt;
+    }
+    return memptr;
+  }
+
+  void free(void *memptr) {
+    ensure(buffsize.count(memptr) > 0);
+    unsigned int floatCnt = buffsize[memptr];
+    resources[floatCnt].push_back(memptr);
+  }
+};
+
+
 class NormalGenerator {
 
 public:
@@ -118,7 +175,6 @@ auto iobuff_generator(const string &iobuffexec) {
   return make_unique<Generator>(iobuffexec);
 }
 
-
 auto image_generator(string path, int height = 229, int width = 229, int thread_para = 4) {
   die_if(thread_para > 32, "Too many thread workers for image_generator: %d.\n", thread_para);
 
@@ -137,11 +193,20 @@ auto image_generator(string path, int height = 229, int width = 229, int thread_
     bool threadStop;
     int cache_size;
 
-    void *cudaHostPtr;
-    ssize_t cudaHostFloatCnt;
+    vector<pair<CUevent, void*>> hostMemBuffer;
+    MemoryManager *hostMem;
 
     Generator(const string &path, int height, int width, int thread_para): height(height), width(width), channel(3),
-        workers(thread_para), cudaHostPtr(nullptr), cudaHostFloatCnt(0LU) {
+        workers(thread_para) {
+
+      hostMem = new MemoryManager([](size_t bytes) -> void* {
+        void *cudaHostPtr = nullptr;
+        ensure(CUDA_SUCCESS == cuMemHostAlloc(&cudaHostPtr, bytes, 0));
+        return cudaHostPtr;
+      }, [](void *cudaHostPtr) {
+        ensure(CUDA_SUCCESS == cuMemFreeHost(cudaHostPtr));
+      });
+      ensure(hostMem != nullptr);
 
       threadStop = false;
       cache_size = (1U << 30) / thread_para / (height * width * channel * sizeof(float));
@@ -193,8 +258,6 @@ auto image_generator(string path, int height = 229, int width = 229, int thread_
         pthread_join(worker.tid, nullptr);
         pthread_mutex_destroy(&worker.m_lock);
       }
-      if (cudaHostPtr != nullptr)
-        ensure(CUDA_SUCCESS == cuMemFreeHost(cudaHostPtr));
     }
 
 
@@ -221,6 +284,9 @@ auto image_generator(string path, int height = 229, int width = 229, int thread_
         while (1) {
           if (threadStop || globalStop) {
             // On Exit
+            while (recycleBuffer())
+              ;
+            delete hostMem;
             __sync_add_and_fetch(&activeThread, -1);
             return;
           }
@@ -241,12 +307,7 @@ auto image_generator(string path, int height = 229, int width = 229, int thread_
     NormalGenerator::Dataset next_batch(int batch_size) {
       size_t split = batch_size * channel * height * width, tail = split + batch_size * keyset.size();
 
-      if (cudaHostFloatCnt < tail) {
-        if (cudaHostPtr != nullptr)
-          ensure(CUDA_SUCCESS == cuMemFreeHost(cudaHostPtr));
-        cudaHostFloatCnt = tail;
-        ensure(CUDA_SUCCESS == cuMemHostAlloc(&cudaHostPtr, cudaHostFloatCnt * sizeof(float), 0));
-      }
+      void *cudaHostPtr = hostMem->allocate(tail);
 
       ensure(cache_size * workers.size() >= batch_size);
       int para = workers.size();
@@ -284,8 +345,31 @@ auto image_generator(string path, int height = 229, int width = 229, int thread_
         Tensor({batch_size, n_class})
       });
       ds.images.set_data(((float*)cudaHostPtr), false);
-      ds.labels.set_data(((float*)cudaHostPtr) + split, true);
+      ds.labels.set_data(((float*)cudaHostPtr) + split, false);
+
+      CUevent event;
+      ensure(CUDA_SUCCESS == cuEventCreate(&event, CU_EVENT_DISABLE_TIMING));
+      ensure(CUDA_SUCCESS == cuEventRecord(event, devices[currentDev].hStream));
+
+      hostMemBuffer.push_back({event, cudaHostPtr});
+      recycleBuffer();
+
       return move(ds);
+    }
+
+    size_t recycleBuffer() {
+      for (int i = 0; i < hostMemBuffer.size(); ++i) {
+        CUresult res = cuEventQuery(hostMemBuffer[i].first);
+        if (res == CUDA_SUCCESS) {
+          ensure(CUDA_SUCCESS == cuEventDestroy(hostMemBuffer[i].first));
+          hostMem->free(hostMemBuffer[i].second);
+          hostMemBuffer[i] = hostMemBuffer.back();
+          hostMemBuffer.pop_back();
+          --i;
+        } else
+         ensure(res == CUDA_ERROR_NOT_READY);
+      }
+      return hostMemBuffer.size();
     }
 
 
