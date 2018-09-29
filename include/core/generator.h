@@ -49,6 +49,76 @@ auto synthetic_generator(int height, int width, int n_class, int channel = 3) {
 }
 
 
+auto iobuff_generator(const string &iobuffexec) {
+
+  struct Generator: public NormalGenerator {
+    int n_class, channel, height, width;
+    FILE *fp;
+
+    void *cudaHostPtr;
+    ssize_t cudaHostFloatCnt;
+    int magic;
+
+    Generator(const string &iobuffexec): cudaHostPtr(nullptr), cudaHostFloatCnt(0LU), magic(0x7fbf00ff) {
+
+      fp = popen(iobuffexec.c_str(), "r");
+      ensure(fp != nullptr);
+
+      int lchw[4];
+      ensure(sizeof(lchw) == fread(lchw, 1, sizeof(lchw), fp));
+
+      n_class = lchw[0];
+      channel = lchw[1], height = lchw[2], width = lchw[3];
+
+      printf("\nDetect Image Buffer from stdio with %d classes and image_shape = (%d, %d, %d).\n", lchw[0], lchw[1], lchw[2], lchw[3]);
+    }
+
+    ~Generator() {
+      if (cudaHostPtr != nullptr)
+        ensure(CUDA_SUCCESS == cuMemFreeHost(cudaHostPtr));
+      if (fp != nullptr)
+        pclose(fp);
+    }
+
+    NormalGenerator::Dataset next_batch(int batch_size) {
+      size_t split = batch_size * channel * height * width, tail = split + batch_size * n_class;
+
+      if (cudaHostFloatCnt < tail) {
+        if (cudaHostPtr != nullptr)
+          ensure(CUDA_SUCCESS == cuMemFreeHost(cudaHostPtr));
+        cudaHostFloatCnt = tail;
+        ensure(CUDA_SUCCESS == cuMemHostAlloc(&cudaHostPtr, cudaHostFloatCnt * sizeof(float), 0));
+      }
+
+      for (int offset = 0; offset < batch_size; ++offset) {
+        float *images = ((float*)cudaHostPtr) + (channel * height * width) * offset;
+        float *labels = ((float*)cudaHostPtr) + split + (n_class) * offset;
+        int header = 0;
+        ensure(1 == fread(&header, sizeof(header), 1, fp));
+        ensure(header == magic);
+        ensure(1 == fread(images, (channel * height * width) * sizeof(float), 1, fp));
+        ensure(1 == fread(labels, (n_class) * sizeof(float), 1, fp));
+        ++offset;
+      }
+
+      auto ds = NormalGenerator::Dataset({
+        Tensor({batch_size, channel, height, width}),
+        Tensor({batch_size, n_class})
+      });
+      ds.images.set_data(((float*)cudaHostPtr), false);
+      ds.labels.set_data(((float*)cudaHostPtr) + split, true);
+      return move(ds);
+    }
+
+    vector<int> get_shape() {
+      return {n_class, channel, height, width};
+    }
+  };
+
+  return make_unique<Generator>(iobuffexec);
+}
+
+
 auto image_generator(string path, int height = 229, int width = 229, int thread_para = 4) {
   die_if(thread_para > 32, "Too many thread workers for image_generator: %d.\n", thread_para);
 
@@ -150,6 +220,7 @@ auto image_generator(string path, int height = 229, int width = 229, int thread_
 
         while (1) {
           if (threadStop || globalStop) {
+            // On Exit
             __sync_add_and_fetch(&activeThread, -1);
             return;
           }

@@ -91,9 +91,9 @@ int main(int argc, char **argv) {
   // auto gen = synthetic_generator(32, 32, 10);
 
   auto ds = load_images("catsdogs"); auto gen = image_generator(ds.first, 224, 224, 8), val_gen = image_generator(ds.second, 224, 224, 1);
-  // auto gen = synthetic_generator(224, 224, 2);
+  // auto ds = load_images("catsdogs"); auto gen = iobuff_generator(string("./iobuffexec.py ") + ds.first), val_gen = iobuff_generator(string("./iobuffexec.py ") + ds.second);
 
-  // auto gen = image_generator("/var/lib/docker/imagenet/train", 224, 224, 8), val_gen = image_generator("/var/lib/docker/imagenet/validate", 224, 224, 1);
+  // auto gen = synthetic_generator(224, 224, 2);
 
   vector<shared_ptr<Model>> model_replias(ngpus);
   vector<shared_ptr<Optimizor>> optimizors(ngpus);
@@ -131,7 +131,6 @@ int main(int argc, char **argv) {
     for (int j = 0; j < weights[i].size(); ++j)
       grad_reduce[i][j] = Tensor(weights[i][j].shape);
   }
-
 
   long lastClock = get_microseconds(), last_k = 0;
 
