@@ -151,6 +151,7 @@ public:
           dys[parent].self_add(dxs[i]);
         }
       }
+      layer->cacheTensors = {};
     }
     return move(grads);
   }
