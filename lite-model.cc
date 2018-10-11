@@ -111,8 +111,8 @@ int main(int argc, char **argv) {
       model_replias[0]->load_weights_from_file("weights.lw");
     }
 
-    optimizors[i] = make_shared<MomentumOptimizor>(model_replias[i], 0.9f, 0.01f, 0.001f);
-    // optimizors[i] = make_shared<SGDOptimizor>(model_replias[i], 0.01f, 0.001f);
+    optimizors[i] = make_shared<MomentumOptimizor>(model_replias[i], 0.9f, 0.001f, 0.001f);
+    // optimizors[i] = make_shared<SGDOptimizor>(model_replias[i], 0.002f, 0.001f);
   }
 
   vector<vector<Tensor>> weights(ngpus), grad_reduce(ngpus), grad(ngpus);
