@@ -1,10 +1,22 @@
 #!/usr/bin/env python3
 
+try:
+  # mpiexec --allow-run-as-root -x NCCL_SOCKET_IFNAME=enp216s0 --bind-to none --map-by slot -H .. ./$0
+  # To avoid MPI linking error when executed by OpenMPI
+  import ctypes
+  ctypes.CDLL("/usr/lib/libmpi.so", mode=ctypes.RTLD_GLOBAL)
+except:
+  pass
+
 import tensorflow as tf
 from tensorflow.python.client import device_lib
 import numpy as np
 import warnings, time, os
 
+ompi_size = int(os.environ['OMPI_COMM_WORLD_SIZE']) if 'OMPI_COMM_WORLD_SIZE' in os.environ else 1
+
+
+synthetic_dataset = True
 
 def warn(*args, **kwargs):
     pass
@@ -53,7 +65,7 @@ data_dir, batch_size, depth, height, width, n_classes = '/tmp/dataset/catsdogs',
 if data_dir[-1] != '/':
   data_dir += '/'
 
-if not os.path.exists(data_dir + ".success"):
+if not synthetic_dataset and not os.path.exists(data_dir + ".success"):
   try:
     dataset = os.path.basename(data_dir[:-1])
     print('Downloading dataset %s ..' % dataset)
@@ -67,7 +79,7 @@ def generator():
   from keras.preprocessing.image import ImageDataGenerator
   from keras.utils import OrderedEnqueuer
   gen = ImageDataGenerator(data_format='channels_first', rescale=1./255, fill_mode='nearest').flow_from_directory(
-                           data_dir + '/train', target_size=(height, width), batch_size=batch_size)
+                           data_dir + '/train', target_size=(height, width), batch_size=batch_size, class_mode='sparse')
   enqueuer = OrderedEnqueuer(gen, use_multiprocessing=False)
   enqueuer.start(workers=8)
   n_classes = gen.num_classes
@@ -76,7 +88,7 @@ def generator():
     batch_xs, batch_ys = next(enqueuer.get())
     yield batch_xs, batch_ys
 
-def create_imagenet_resnet50v1(X, Y):
+def create_imagenet_resnet50v1(X, Y, n_classes):
   print('Creating imagenet_resnet50v1 on scope `%s`..' % tf.get_default_graph().get_name_scope())
 
   X = conv2d(X, 64, 7, 2, 3)
@@ -112,65 +124,81 @@ def create_imagenet_resnet50v1(X, Y):
 
   X = apool2d(X, int(X.shape[2]), 1)
   X = flatten(X)
-  X = dense(X, int(Y.shape[1]))
 
-  loss = tf.reduce_mean(tf.nn.softmax_cross_entropy_with_logits_v2(logits=X, labels=Y))
+  denseY = tf.one_hot(Y, n_classes)
+  X = dense(X, n_classes)
+
+  loss = tf.reduce_mean(tf.nn.softmax_cross_entropy_with_logits_v2(logits=X, labels=denseY))
   return loss
 
 train_ops, losses = [], []
 grad_avg, opts = [], []
 tower_grads, tower_vars = [], []
 
-ngpus = 4 # len(get_available_gpus())
-
-for i in range(ngpus):
-  with tf.name_scope('gpu_%d' % i), tf.device('/gpu:%d' % i):
-    ds = tf.data.Dataset.from_generator(generator, (tf.float32, tf.float32))
-    ds = ds.prefetch(buffer_size=batch_size)
-    images, labels = ds.make_one_shot_iterator().get_next()
-    X = tf.reshape(images, (-1, depth, height, width))
-    Y = tf.reshape(labels, (-1, n_classes))
-
-    ''' with tf.device('/cpu:0'):
-      X = tf.zeros([batch_size, depth, height, width], dtype=tf.float32)
-      Y = tf.zeros([batch_size, n_classes], dtype=tf.float32) '''
-
-    # opt = tf.train.MomentumOptimizer(learning_rate=0.01, momentum=0.9)
-    # opt = tf.train.AdamOptimizer(learning_rate=0.01)
-    # opt = tf.train.AdadeltaOptimizer(learning_rate=0.01)
-    opt = tf.train.AdagradOptimizer(learning_rate=0.01)
-
-    loss = create_imagenet_resnet50v1(X, Y)
-    grad_gv = opt.compute_gradients(loss, tf_weights[tf.get_default_graph().get_name_scope()])
-    grad_g = [g for g, _ in grad_gv]
-    grad_v = [v for _, v in grad_gv]
-    tower_grads.append(grad_g)
-    tower_vars.append(grad_v)
-    losses.append(loss)
-    opts.append(opt)
-
-if ngpus == 1:
-  it = next(zip(*tower_grads))
-  grad_avg = [it]
-else:
-  for it in zip(*tower_grads):
-    all_sum = tf.contrib.nccl.all_sum(it)
-    for i in range(len(all_sum)):
-      all_sum[i] /= ngpus
-    grad_avg.append(all_sum)
-
-for i, it in enumerate(zip(*grad_avg)):
-  with tf.name_scope('gpu_%d' % i), tf.device('/gpu:%d' % i):
-    grad = zip(list(it), tower_vars[i])
-    train_ops.append(opts[i].apply_gradients(grad))
-
-mean_loss = tf.reduce_sum(losses) / ngpus
-
-
 config=tf.ConfigProto(allow_soft_placement=True)
 config.gpu_options.allow_growth=True
 
+def get_available_gpus():
+    from tensorflow.python.client import device_lib
+    local_device_protos = device_lib.list_local_devices()
+    return [x.name for x in local_device_protos if x.device_type == 'GPU']
+
 with tf.Session(config=config) as sess:
+  ngpus = len(get_available_gpus())
+  reduce_size = ngpus * ompi_size
+
+  for i in range(ngpus):
+    with tf.name_scope('gpu_%d' % i), tf.device('/gpu:%d' % i):
+      if not synthetic_dataset:
+        ds = tf.data.Dataset.from_generator(generator, (tf.float32, tf.float32))
+        ds = ds.prefetch(buffer_size=batch_size)
+        images, labels = ds.make_one_shot_iterator().get_next()
+        X = tf.reshape(images, (-1, depth, height, width))
+        Y = tf.reshape(labels, (-1, n_classes))
+      else:
+        image_shape = [batch_size, depth, height, width]
+        label_shape = [batch_size]
+        X = tf.random_uniform(image_shape, dtype=tf.float32, seed=i)
+        Y = tf.random_uniform(label_shape, maxval=n_classes, dtype=tf.int32, seed=i)
+        ''' with tf.device('/cpu:0'):
+          os.environ['IMAGE_BATCH'] = str(np.product(image_shape))
+          os.environ['LABEL_BATCH'] = str(np.product(label_shape))
+          ds = tf.data.Dataset.from_tensors((tf.fill(image_shape, np.float32(np.NaN)), tf.fill(label_shape, np.int32(0x7fc00001))))
+          images, labels = ds.repeat().make_one_shot_iterator().get_next()
+          X = tf.reshape(images, image_shape)
+          Y = tf.reshape(labels, label_shape) '''
+
+      lr = 0.01 / reduce_size
+      opt = tf.train.GradientDescentOptimizer(learning_rate=lr)
+      # opt = tf.train.MomentumOptimizer(learning_rate=lr, momentum=0.9)
+      # opt = tf.train.AdamOptimizer(learning_rate=lr)
+      # opt = tf.train.AdadeltaOptimizer(learning_rate=lr)
+      # opt = tf.train.AdagradOptimizer(learning_rate=lr)
+
+      loss = create_imagenet_resnet50v1(X, Y, n_classes)
+      grad_gv = opt.compute_gradients(loss, tf_weights[tf.get_default_graph().get_name_scope()])
+      grad_g = [g for g, _ in grad_gv]
+      grad_v = [v for _, v in grad_gv]
+      tower_grads.append(grad_g)
+      tower_vars.append(grad_v)
+      losses.append(loss)
+      opts.append(opt)
+
+  if ngpus == 1:
+    it = next(zip(*tower_grads))
+    grad_avg = [it]
+  else:
+    for it in zip(*tower_grads):
+      all_sum = tf.contrib.nccl.all_sum(it)
+      grad_avg.append(all_sum)
+
+  for i, it in enumerate(zip(*grad_avg)):
+    with tf.name_scope('gpu_%d' % i), tf.device('/gpu:%d' % i):
+      grad = zip(list(it), tower_vars[i])
+      train_ops.append(opts[i].apply_gradients(grad))
+
+  mean_loss = tf.reduce_sum(losses) / ngpus
+
   sess.run(tf.global_variables_initializer())
 
   # Synchronize initial weights
