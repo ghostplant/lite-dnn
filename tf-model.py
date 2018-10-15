@@ -1,22 +1,12 @@
 #!/usr/bin/env python3
 
-try:
-  # mpiexec --allow-run-as-root -x NCCL_SOCKET_IFNAME=enp216s0 --bind-to none --map-by slot -H .. ./$0
-  # To avoid MPI linking error when executed by OpenMPI
-  import ctypes
-  ctypes.CDLL("/usr/lib/libmpi.so", mode=ctypes.RTLD_GLOBAL)
-except:
-  pass
-
 import tensorflow as tf
-from tensorflow.python.client import device_lib
 import numpy as np
 import warnings, time, os
 
-ompi_size = int(os.environ['OMPI_COMM_WORLD_SIZE']) if 'OMPI_COMM_WORLD_SIZE' in os.environ else 1
-
-
 synthetic_dataset = True
+batch_size, depth, height, width = 64, 3, 224, 224
+data_dir = '/tmp/dataset/catsdogs/train'
 
 def warn(*args, **kwargs):
     pass
@@ -60,34 +50,6 @@ def flatten(X):
   return tf.reshape(X, shape=[-1, np.product(X.shape[1:])])
 
 
-data_dir, batch_size, depth, height, width, n_classes = '/tmp/dataset/catsdogs', 64, 3, 224, 224, 2
-
-if data_dir[-1] != '/':
-  data_dir += '/'
-
-if not synthetic_dataset and not os.path.exists(data_dir + ".success"):
-  try:
-    dataset = os.path.basename(data_dir[:-1])
-    print('Downloading dataset %s ..' % dataset)
-    assert(0 == os.system("mkdir -p '%s' && curl -L 'https://github.com/ghostplant/lite-dnn/releases/download/lite-dataset/images-%s.tar.gz' | tar xzvf - -C '%s' >/dev/null" % (data_dir, dataset, data_dir)))
-    open('/tmp/dataset/%s/.success' % dataset, 'wb').close()
-  except:
-    raise Exception("Failed to download dataset.")
-
-
-def generator():
-  from keras.preprocessing.image import ImageDataGenerator
-  from keras.utils import OrderedEnqueuer
-  gen = ImageDataGenerator(data_format='channels_first', rescale=1./255, fill_mode='nearest').flow_from_directory(
-                           data_dir + '/train', target_size=(height, width), batch_size=batch_size, class_mode='sparse')
-  enqueuer = OrderedEnqueuer(gen, use_multiprocessing=False)
-  enqueuer.start(workers=8)
-  n_classes = gen.num_classes
-
-  while True:
-    batch_xs, batch_ys = next(enqueuer.get())
-    yield batch_xs, batch_ys
-
 def create_imagenet_resnet50v1(X, Y, n_classes):
   print('Creating imagenet_resnet50v1 on scope `%s`..' % tf.get_default_graph().get_name_scope())
 
@@ -124,14 +86,13 @@ def create_imagenet_resnet50v1(X, Y, n_classes):
 
   X = apool2d(X, int(X.shape[2]), 1)
   X = flatten(X)
-
-  denseY = tf.one_hot(Y, n_classes)
   X = dense(X, n_classes)
 
-  loss = tf.reduce_mean(tf.nn.softmax_cross_entropy_with_logits_v2(logits=X, labels=denseY))
-  return loss
+  loss = tf.reduce_mean(tf.nn.softmax_cross_entropy_with_logits_v2(logits=X, labels=Y))
+  accuracy = tf.reduce_mean(tf.cast(tf.equal(tf.argmax(Y, 1), tf.argmax(X, 1)), tf.float32))
+  return loss, accuracy
 
-train_ops, losses = [], []
+train_ops, losses, acces = [], [], []
 grad_avg, opts = [], []
 tower_grads, tower_vars = [], []
 
@@ -143,44 +104,70 @@ def get_available_gpus():
     local_device_protos = device_lib.list_local_devices()
     return [x.name for x in local_device_protos if x.device_type == 'GPU']
 
+def create_dataset(data_dir):
+  if data_dir[-1] != '/':
+    data_dir += '/'
+  n_classes = 0
+  for subdir in os.listdir(data_dir):
+    path = os.path.join(data_dir, subdir)
+    if os.path.isdir(path):
+      n_classes = n_classes + 1
+  '''
+  if not synthetic_dataset and not os.path.exists(data_dir + ".success"):
+    try:
+      dataset = os.path.basename(data_dir[:-1])
+      print('Downloading dataset %s ..' % dataset)
+      assert(0 == os.system("mkdir -p '%s' && curl -L 'https://github.com/ghostplant/lite-dnn/releases/download/lite-dataset/images-%s.tar.gz' | tar xzvf - -C '%s' >/dev/null" % (data_dir, dataset, data_dir)))
+      open('/tmp/dataset/%s/.success' % dataset, 'wb').close()
+    except:
+      raise Exception("Failed to download dataset.")
+  '''
+
+  def generator():
+    from keras.preprocessing.image import ImageDataGenerator
+    from keras.utils import OrderedEnqueuer
+    gen = ImageDataGenerator(data_format='channels_first', rescale=1./255, fill_mode='nearest').flow_from_directory(
+                             data_dir, target_size=(height, width), batch_size=batch_size)
+    assert(n_classes == gen.num_classes)
+    enqueuer = OrderedEnqueuer(gen, use_multiprocessing=False)
+    enqueuer.start(workers=8)
+    while True:
+      batch_xs, batch_ys = next(enqueuer.get())
+      yield batch_xs, batch_ys
+
+  ds = tf.data.Dataset.from_generator(generator, (tf.float32, tf.float32))
+  ds = ds.prefetch(buffer_size=batch_size)
+  images, labels = ds.make_one_shot_iterator().get_next()
+  X = tf.reshape(images, (-1, depth, height, width))
+  Y = tf.reshape(labels, (-1, n_classes))
+  return X, Y, n_classes
+
+
 with tf.Session(config=config) as sess:
   ngpus = len(get_available_gpus())
-  reduce_size = ngpus * ompi_size
 
   for i in range(ngpus):
     with tf.name_scope('gpu_%d' % i), tf.device('/gpu:%d' % i):
       if not synthetic_dataset:
-        ds = tf.data.Dataset.from_generator(generator, (tf.float32, tf.float32))
-        ds = ds.prefetch(buffer_size=batch_size)
-        images, labels = ds.make_one_shot_iterator().get_next()
-        X = tf.reshape(images, (-1, depth, height, width))
-        Y = tf.reshape(labels, (-1, n_classes))
+        X, Y, n_classes = create_dataset(data_dir)
       else:
-        image_shape = [batch_size, depth, height, width]
-        label_shape = [batch_size]
-        X = tf.random_uniform(image_shape, dtype=tf.float32, seed=i)
-        Y = tf.random_uniform(label_shape, maxval=n_classes, dtype=tf.int32, seed=i)
-        ''' with tf.device('/cpu:0'):
-          os.environ['IMAGE_BATCH'] = str(np.product(image_shape))
-          os.environ['LABEL_BATCH'] = str(np.product(label_shape))
-          ds = tf.data.Dataset.from_tensors((tf.fill(image_shape, np.float32(np.NaN)), tf.fill(label_shape, np.int32(0x7fc00001))))
-          images, labels = ds.repeat().make_one_shot_iterator().get_next()
-          X = tf.reshape(images, image_shape)
-          Y = tf.reshape(labels, label_shape) '''
+        n_classes = 1000
+        X = tf.random_uniform([batch_size, depth, height, width], dtype=tf.float32, seed=i)
+        Y = tf.random_uniform([batch_size, n_classes], maxval=1.0 / n_classes, dtype=tf.float32, seed=(i+1))
 
-      lr = 0.01 / reduce_size
-      opt = tf.train.GradientDescentOptimizer(learning_rate=lr)
+      lr = 0.01 / ngpus
       # opt = tf.train.MomentumOptimizer(learning_rate=lr, momentum=0.9)
       # opt = tf.train.AdamOptimizer(learning_rate=lr)
       # opt = tf.train.AdadeltaOptimizer(learning_rate=lr)
-      # opt = tf.train.AdagradOptimizer(learning_rate=lr)
+      opt = tf.train.AdagradOptimizer(learning_rate=lr)
 
-      loss = create_imagenet_resnet50v1(X, Y, n_classes)
+      loss, accuracy = create_imagenet_resnet50v1(X, Y, n_classes)
       grad_gv = opt.compute_gradients(loss, tf_weights[tf.get_default_graph().get_name_scope()])
       grad_g = [g for g, _ in grad_gv]
       grad_v = [v for _, v in grad_gv]
       tower_grads.append(grad_g)
       tower_vars.append(grad_v)
+      acces.append(accuracy)
       losses.append(loss)
       opts.append(opt)
 
@@ -198,6 +185,7 @@ with tf.Session(config=config) as sess:
       train_ops.append(opts[i].apply_gradients(grad))
 
   mean_loss = tf.reduce_sum(losses) / ngpus
+  mean_acc = tf.reduce_sum(acces) / ngpus
 
   sess.run(tf.global_variables_initializer())
 
@@ -207,12 +195,12 @@ with tf.Session(config=config) as sess:
 
   print('Launch Training ..')
   freq = 100
-  init_time = last_time = time.time()
+  last_time, last_k = time.time(), -1
   for k in range(100000):
     sess.run(train_ops)
-    if (k + 1) % freq == 0:
+    if k == 0 or (k + 1) % freq == 0:
       curr_time = time.time()
-      print('step = %d (batch = %d; %.2f images/sec): loss = %.4f, during = %.3fs' % ((k + 1),
-        batch_size * ngpus, batch_size * ngpus * (k + 1) / (curr_time - init_time), sess.run(mean_loss), curr_time - last_time))
-
-      last_time = time.time()
+      loss, acc = sess.run([mean_loss, mean_acc])
+      print('step = %d (batch = %d; %.2f images/sec): loss = %.4f, acc = %.4f, during = %.3fs' % ((k + 1),
+        batch_size * ngpus, batch_size * ngpus * (k - last_k) / (curr_time - last_time), loss, acc, curr_time - last_time))
+      last_time, last_k = time.time(), k
