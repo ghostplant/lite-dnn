@@ -3,9 +3,9 @@
 [Example]
 
 # HOROVOD_GPU_ALLREDUCE=NCCL pip3 install --no-cache-dir --upgrade horovod
-# mpiexec -H 192.168.2.130,192.168.2.130,192.168.2.130,192.168.2.130,192.168.2.131,192.168.2.131,192.168.2.131,192.168.2.131,192.168.2.132,192.168.2.132,192.168.2.132,192.168.2.132 \
+# g++ main.cpp -fPIC -shared -lpthread -lcuda -lcudart -I/usr/local/cuda/include -L/usr/local/cuda/lib64 && mpiexec -H 192.168.2.130,192.168.2.130,192.168.2.130,192.168.2.130,192.168.2.131,192.168.2.131,192.168.2.131,192.168.2.131,192.168.2.132,192.168.2.132,192.168.2.132,192.168.2.132 \
     --mca oob_tcp_if_include enp216s0 --mca btl_tcp_if_include enp216s0 -x NCCL_SOCKET_IFNAME=enp216s0 \
-    --allow-run-as-root --map-by slot --bind-to none -x NCCL_DEBUG=INFO ./hvd-model.py /usr/imagenet/flower_photos
+    --allow-run-as-root --map-by slot --bind-to none -x LD_PRELOAD=`pwd`/a.out -x NCCL_DEBUG=INFO ./hvd-model.py # /usr/imagenet/flower_photos
 '''
 
 import tensorflow as tf
@@ -23,9 +23,19 @@ global_step, query_freq = 100000, 100
 def create_dataset(synthetic=False):
   if len(sys.argv) <= 1:
     print('Using synthetic dataset on %s..' % device_name)
-    n_classes = 1000
-    X = tf.random_uniform((batch_size, depth, height, width), dtype=tf.float32, seed=1)
+    n_classes = 1001
+    '''X = tf.random_uniform((batch_size, depth, height, width), dtype=tf.float32, seed=1)
     Y = tf.random_uniform((batch_size, n_classes), maxval=1.0/n_classes, dtype=tf.float32, seed=1)
+    return X, Y, n_classes'''
+    with tf.device('/cpu:0'):
+      X = tf.fill((batch_size, depth, height, width), np.float32(np.NaN))
+      Y = tf.fill((batch_size, n_classes), np.float32(np.NaN))
+      os.environ['IMAGE_SIZE'] = str(np.product([batch_size, depth, height, width]))
+      os.environ['LABEL_SIZE'] = str(np.product([batch_size, n_classes]))
+    ds = tf.data.Dataset.from_tensors((X, Y)).repeat()
+    images, labels = ds.make_one_shot_iterator().get_next()
+    X = tf.reshape(images, (-1, depth, height, width))
+    Y = tf.reshape(labels, (-1, n_classes))
     return X, Y, n_classes
 
   data_dir = sys.argv[1]
