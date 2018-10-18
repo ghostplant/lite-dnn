@@ -20,25 +20,25 @@ batch_size, depth, height, width = 64, 3, 224, 224
 global_step, query_freq = 100000, 100
 
 
-def create_dataset(synthetic=False):
-  if len(sys.argv) <= 1:
-    print('Using synthetic dataset on %s..' % device_name)
+def create_dataset(data_dir=None):
+  if not data_dir:
     n_classes = 1001
-    '''X = tf.random_uniform((batch_size, depth, height, width), dtype=tf.float32, seed=1)
-    Y = tf.random_uniform((batch_size, n_classes), maxval=1.0/n_classes, dtype=tf.float32, seed=1)
-    return X, Y, n_classes'''
+    if 'GPUAAS' not in os.environ:
+      print('Using synthetic dataset on %s..' % device_name)
+      X = tf.random_uniform((batch_size, depth, height, width), dtype=tf.float32, seed=1)
+      Y = tf.random_uniform((batch_size, ), maxval=n_classes, dtype=tf.int32, seed=2)
+      return X, Y, n_classes
+
+    print('Using low-level dataset on %s..' % device_name)
     with tf.device('/cpu:0'):
-      X = tf.fill((batch_size, depth, height, width), np.float32(np.NaN))
-      Y = tf.fill((batch_size, n_classes), np.float32(np.NaN))
       os.environ['IMAGE_SIZE'] = str(np.product([batch_size, depth, height, width]))
-      os.environ['LABEL_SIZE'] = str(np.product([batch_size, n_classes]))
-    ds = tf.data.Dataset.from_tensors((X, Y)).repeat()
-    images, labels = ds.make_one_shot_iterator().get_next()
-    X = tf.reshape(images, (-1, depth, height, width))
-    Y = tf.reshape(labels, (-1, n_classes))
+      os.environ['LABEL_SIZE'] = str(np.product([batch_size, ]))
+      ds = tf.data.Dataset.from_tensors((tf.fill((batch_size, depth, height, width), np.float32(np.NaN)), tf.fill((batch_size, ), np.int32(0x7fc00001)))).repeat()
+      images, labels = ds.make_one_shot_iterator().get_next()
+      X = tf.reshape(images, (-1, depth, height, width))
+      Y = tf.reshape(labels, (-1, ))
     return X, Y, n_classes
 
-  data_dir = sys.argv[1]
   print('Using real dataset `%s` on %s..' % (data_dir, device_name))
 
   if data_dir[-1] != '/':
@@ -58,7 +58,7 @@ def create_dataset(synthetic=False):
     from keras.preprocessing.image import ImageDataGenerator
     from keras.utils import OrderedEnqueuer
     gen = ImageDataGenerator(data_format='channels_first', rescale=1./255, fill_mode='nearest').flow_from_directory(
-                             data_dir, target_size=(height, width), batch_size=batch_size)
+                             data_dir, target_size=(height, width), batch_size=batch_size, class_mode='sparse')
     assert(n_classes == gen.num_classes)
     enqueuer = OrderedEnqueuer(gen, use_multiprocessing=False)
     enqueuer.start(workers=8)
@@ -67,14 +67,15 @@ def create_dataset(synthetic=False):
       yield batch_xs, batch_ys
     enqueuer.close() # Never reached
 
-  ds = tf.data.Dataset.from_generator(generator, (tf.float32, tf.float32))
+  ds = tf.data.Dataset.from_generator(generator, (tf.float32, tf.int32))
   ds = ds.prefetch(buffer_size=1024)
   images, labels = ds.make_one_shot_iterator().get_next()
   X = tf.reshape(images, (-1, depth, height, width))
-  Y = tf.reshape(labels, (-1, n_classes))
+  Y = tf.reshape(labels, (-1,))
   return X, Y, n_classes
 
-X, Y, n_classes = create_dataset()
+
+X, Y, n_classes = create_dataset(sys.argv[1] if len(sys.argv) > 1 else None)
 
 def create_imagenet_resnet50v1(X, Y, n_classes):
   print('Creating imagenet_resnet50v1 on %s..' % device_name)
@@ -83,9 +84,9 @@ def create_imagenet_resnet50v1(X, Y, n_classes):
   from models.resnet_model import create_resnet50_model
   model = create_resnet50_model()
   X, _ = model.build_network(X, nclass=n_classes, image_depth=depth, data_format='NHWC', phase_train=True, fp16_vars=False)
-
-  loss = tf.reduce_mean(tf.nn.softmax_cross_entropy_with_logits_v2(logits=X, labels=Y))
-  accuracy = tf.reduce_mean(tf.cast(tf.equal(tf.argmax(Y, 1), tf.argmax(X, 1)), tf.float32))
+  loss = tf.losses.sparse_softmax_cross_entropy(logits=X, labels=Y)
+  # accuracy = tf.reduce_mean(tf.cast(tf.nn.in_top_k(X, Y, 1), tf.float32))
+  accuracy = tf.reduce_mean(tf.cast(tf.equal(tf.cast(Y, tf.int64), tf.argmax(X, 1)), tf.float32))
   return loss, accuracy, tf.trainable_variables()
 
 loss, accuracy, weights = create_imagenet_resnet50v1(X, Y, n_classes)
@@ -105,8 +106,8 @@ for i in range(len(grad_vars)):
   grad = hvd.allreduce(grad, average=True)
   grad_vars[i] = (grad, var)
 
-train_op = opt.apply_gradients(grad_vars)
-# train_op = hvd.DistributedOptimizer(tf.train.AdagradOptimizer(lr * hvd.size())).minimize(loss)
+# train_op = opt.apply_gradients(grad_vars)
+train_op = hvd.DistributedOptimizer(tf.train.AdagradOptimizer(lr * hvd.size())).minimize(loss)
 
 
 config=tf.ConfigProto(allow_soft_placement=True)
