@@ -150,10 +150,10 @@ namespace image_generator {
       }
       n_class = keyset.size();
 
-      printf("\nTotal %d samples found with %d classes for `file://%s`:\n", samples, n_class, path.c_str());
+      printf("[GPU-%d] Total %d samples found with %d classes from `file://%s`;\n", hvd_rank, samples, n_class, path.c_str());
       die_if(!samples, "No valid samples found in directory.");
-      for (int i = 0; i < n_class; ++i)
-        printf("  (*) class %d => %s (%zd samples)\n", i, keyset[i].c_str(), dict[keyset[i]].size());
+      // for (int i = 0; i < n_class; ++i)
+      //  printf("  (*) class %d => %s (%zd samples)\n", i, keyset[i].c_str(), dict[keyset[i]].size());
 
       __sync_add_and_fetch(&activeThread, workers.size());
       pthread_spin_init(&s_lock, 0);
@@ -213,7 +213,7 @@ namespace image_generator {
           pthread_mutex_lock(&m_lock);
           if (hostMemImages.size() >= cache_size || hostMemLabels.size() >= cache_size) {
             pthread_mutex_unlock(&m_lock);
-            usleep(10000);
+            usleep(100000);
           } else {
             hostMemImages.push((float*)cudaHostPtr);
             hostMemLabels.push((int*)cudaHostPtrSplit);
@@ -245,8 +245,14 @@ namespace image_generator {
 
       cv::Size dst_size(height, width);
       cv::Mat dst;
+      double angle = (2.0 * rand() / double(RAND_MAX) - 1.0) * 10.0;
+      double scale = 1.0 + 0.2 * rand() / double(RAND_MAX);
+      cv::Mat matRotation = cv::getRotationMatrix2D(cv::Point(image.cols / 2, image.rows / 2), angle, scale);
+      cv::warpAffine(image, dst, matRotation, image.size());
+      swap(dst, image);
       cv::resize(image, dst, dst_size);
       *(int*)l = one_hot; // l[one_hot] = 1.0f;
+      // cv::imwrite(string("/var/www/html/test.jpg"), dst);
 
       uint8_t *ptr = dst.data;
 
@@ -278,7 +284,7 @@ namespace image_generator {
 void *create_generator() {
   string path = getenv("GPUAAS_DATASET"), format = getenv("GPUAAS_FORMAT");
   int height = atoi(getenv("GPUAAS_HEIGHT")), width = atoi(getenv("GPUAAS_WIDTH")), batch_size = atoi(getenv("GPUAAS_BATCHSIZE"));
-  int thread_para = 4;
+  int thread_para = 8;
   die_if(thread_para > 16, "Too many thread workers for image_generator: count = %d.\n", thread_para);
   if (path.size() > 0 && path[path.size() - 1] != '/')
     path += '/';

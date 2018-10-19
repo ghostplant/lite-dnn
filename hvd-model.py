@@ -3,7 +3,7 @@
 [Example]
 
 # HOROVOD_GPU_ALLREDUCE=NCCL pip3 install --no-cache-dir --upgrade horovod
-# g++ generator.cpp -fPIC -O3 -std=c++14 -shared -lpthread -lcuda -lcudart -lopencv_core -lopencv_highgui -lopencv_imgproc -I/usr/local/cuda/include -L/usr/local/cuda/lib64 && mpiexec -H 192.168.2.130,192.168.2.130,192.168.2.130,192.168.2.130,192.168.2.131,192.168.2.131,192.168.2.131,192.168.2.131,192.168.2.132,192.168.2.132,192.168.2.132,192.168.2.132  --mca oob_tcp_if_include enp216s0 --mca btl_tcp_if_include enp216s0 -x NCCL_SOCKET_IFNAME=enp216s0     --allow-run-as-root --map-by slot --bind-to none -x LD_PRELOAD=`pwd`/a.out -x NCCL_DEBUG=INFO -x GPUAAS=1 ./hvd-model.py # /var/lib/docker/imagenet/train
+# g++ generator.cpp -fPIC -O3 -std=c++14 -shared -lpthread -lcuda -lcudart -lopencv_core -lopencv_highgui -lopencv_imgproc -I/usr/local/cuda/include -L/usr/local/cuda/lib64 && mpiexec -H 192.168.2.130,192.168.2.130,192.168.2.130,192.168.2.130,192.168.2.131,192.168.2.131,192.168.2.131,192.168.2.131,192.168.2.132,192.168.2.132,192.168.2.132,192.168.2.132  --mca oob_tcp_if_include enp216s0 --mca btl_tcp_if_include enp216s0 -x NCCL_SOCKET_IFNAME=enp216s0     --allow-run-as-root --map-by slot --bind-to none -x LD_PRELOAD=`pwd`/a.out -x NCCL_DEBUG=INFO -x GPUAAS_DATASET=/var/lib/docker/imagenet/train ./hvd-model.py
 '''
 
 import time, os, sys
@@ -13,8 +13,7 @@ os.environ['GPUAAS_BATCHSIZE'] = str(batch_size)
 os.environ['GPUAAS_HEIGHT'] = str(height)
 os.environ['GPUAAS_WIDTH'] = str(width)
 os.environ['GPUAAS_BATCHSIZE'] = str(batch_size)
-os.environ['GPUAAS_FORMAT'] = 'NHWC'
-model_format = 'NHWC'
+os.environ['GPUAAS_FORMAT'] = 'NCHW'
 
 import tensorflow as tf
 import numpy as np
@@ -86,7 +85,7 @@ def create_imagenet_resnet50v1(X, Y, n_classes):
   # Using external models
   from models.resnet_model import create_resnet50_model
   model = create_resnet50_model()
-  X, _ = model.build_network(X, nclass=n_classes, image_depth=depth, data_format=model_format, phase_train=True, fp16_vars=False)
+  X, _ = model.build_network(X, nclass=n_classes, image_depth=depth, data_format='NHWC', phase_train=True, fp16_vars=False)
   loss = tf.losses.sparse_softmax_cross_entropy(logits=X, labels=Y)
   # accuracy = tf.reduce_mean(tf.cast(tf.nn.in_top_k(X, Y, 1), tf.float32))
   accuracy = tf.reduce_mean(tf.cast(tf.equal(tf.cast(Y, tf.int64), tf.argmax(X, 1)), tf.float32))
@@ -138,6 +137,12 @@ with tf.Session(config=config) as sess:
       print('Not using pre-trained weights.')
   sess.run(hvd.broadcast_global_variables(0))
 
+  if 'EVAL' in os.environ:
+    for k in range(global_step):
+      out_acc = sess.run(accuracy)
+      print('[%s] mean_accuracy = %.2f%%' % (device_name, out_acc * 1e2))
+    exit(0)
+
   print('Launch Training on %s..' % device_name)
   last_time, last_k = time.time(), -1
   for k in range(global_step):
@@ -148,7 +153,7 @@ with tf.Session(config=config) as sess:
       during = curr_time - last_time
       print('[%s] step = %d (batch = %d; %.2f images/sec): loss = %.4f, acc = %.2f%%, during = %.3fs' % (device_name, (k + 1),
         batch_size, batch_size * (k - last_k) / during, out_loss, out_acc * 1e2, during))
-      if (k + 1) % 5000 == 0 or (k + 1) == global_step:
+      if (k + 1) % 1000 == 0 or (k + 1) == global_step:
          weights_data = sess.run(weights)
          if device_rank == 0:
            print('Saving current weights on [%s]..' % device_name)
