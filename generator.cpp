@@ -260,7 +260,7 @@ namespace image_generator {
         float *b = chw, *g = b + height * width, *r = g + height * width;
         for (int h = 0; h < height; ++h) {
           for (int w = 0; w < width; ++w) {
-            *b++ = *ptr++ / 255.0f, *g++ = *ptr++ / 255.0f, *r++ = *ptr++ / 255.0f;
+            *r++ = *ptr++ / 255.0f, *g++ = *ptr++ / 255.0f, *b++ = *ptr++ / 255.0f;
           }
         }
       } else {

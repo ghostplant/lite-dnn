@@ -23,7 +23,7 @@ hvd.init()
 device_rank = hvd.rank()
 device_name = 'GPU: %%%dd/%%d' % len(str(hvd.size())) % (device_rank + 1, hvd.size())
 
-global_step, query_freq = 100000, 200
+global_step, query_freq = 1000000, 200
 
 
 def create_dataset(data_dir=None):
@@ -59,11 +59,18 @@ def create_dataset(data_dir=None):
 
     from keras.preprocessing.image import ImageDataGenerator
     from keras.utils import OrderedEnqueuer
-    gen = ImageDataGenerator(data_format='channels_first', rescale=1./255, fill_mode='nearest').flow_from_directory(
-                             data_dir, target_size=(height, width), batch_size=batch_size, class_mode='sparse')
+    gen = ImageDataGenerator(
+      data_format='channels_first',
+      rescale=1./255,
+      horizontal_flip=True,
+      rotation_range=10.0,
+      zoom_range=0.2,
+      width_shift_range=0.1,
+      height_shift_range=0.1,
+      fill_mode='nearest').flow_from_directory(data_dir, target_size=(height, width), batch_size=batch_size, class_mode='sparse')
     assert(gen.num_classes <= n_classes)
     enqueuer = OrderedEnqueuer(gen, use_multiprocessing=False)
-    enqueuer.start(workers=8)
+    enqueuer.start(workers=16)
     while True:
       batch_xs, batch_ys = next(enqueuer.get())
       yield batch_xs, batch_ys
@@ -83,23 +90,25 @@ def create_imagenet_resnet50v1(X, Y, n_classes):
   print('Creating imagenet_resnet50v1 on %s..' % device_name)
 
   # Using external models
-  from models.resnet_model import create_resnet50_model
-  model = create_resnet50_model()
+  from models.resnet_model import create_resnet50_v2_model
+  model = create_resnet50_v2_model()
   X, _ = model.build_network(X, nclass=n_classes, image_depth=depth, data_format='NHWC', phase_train=True, fp16_vars=False)
   loss = tf.losses.sparse_softmax_cross_entropy(logits=X, labels=Y)
-  # accuracy = tf.reduce_mean(tf.cast(tf.nn.in_top_k(X, Y, 1), tf.float32))
+  accuracy_3 = tf.reduce_mean(tf.cast(tf.nn.in_top_k(X, Y, 3), tf.float32))
+  accuracy_5 = tf.reduce_mean(tf.cast(tf.nn.in_top_k(X, Y, 5), tf.float32))
   accuracy = tf.reduce_mean(tf.cast(tf.equal(tf.cast(Y, tf.int64), tf.argmax(X, 1)), tf.float32))
-  return loss, accuracy, tf.trainable_variables()
+  return loss, [accuracy, accuracy_3, accuracy_5], tf.trainable_variables()
 
-loss, accuracy, weights = create_imagenet_resnet50v1(X, Y, n_classes)
+loss, [accuracy, accuracy_3, accuracy_5], weights = create_imagenet_resnet50v1(X, Y, n_classes)
 
-lr = 0.001
+lr = 0.001 * hvd.size()
+
+opt = tf.train.RMSPropOptimizer(lr, decay=0.95, momentum=0.9)
 # opt = tf.train.GradientDescentOptimizer(learning_rate=lr)
-# opt = tf.train.MomentumOptimizer(learning_rate=lr, momentum=0.9)
 # opt = tf.train.MomentumOptimizer(learning_rate=lr, momentum=0.9)
 # opt = tf.train.AdamOptimizer(learning_rate=lr)
 # opt = tf.train.AdadeltaOptimizer(learning_rate=lr)
-opt = tf.train.AdagradOptimizer(learning_rate=lr)
+# opt = tf.train.AdagradOptimizer(learning_rate=lr)
 
 grad_vars = opt.compute_gradients(loss)
 
@@ -109,7 +118,7 @@ for i in range(len(grad_vars)):
   grad_vars[i] = (grad, var)
 
 # train_op = opt.apply_gradients(grad_vars)
-train_op = hvd.DistributedOptimizer(tf.train.AdagradOptimizer(lr * hvd.size())).minimize(loss)
+train_op = hvd.DistributedOptimizer(opt).minimize(loss)
 
 
 config=tf.ConfigProto(allow_soft_placement=True)
@@ -139,8 +148,8 @@ with tf.Session(config=config) as sess:
 
   if 'EVAL' in os.environ:
     for k in range(global_step):
-      out_acc = sess.run(accuracy)
-      print('[%s] mean_accuracy = %.2f%%' % (device_name, out_acc * 1e2))
+      out_acc = sess.run([accuracy, accuracy_3, accuracy_5])
+      print('[%s] top_1 = %.2f%%, top_3 = %.2f%%, top_5 = %.2f%%' % (device_name, out_acc[0] * 1e2, out_acc[1] * 1e2, out_acc[2] * 1e2))
     exit(0)
 
   print('Launch Training on %s..' % device_name)

@@ -389,6 +389,11 @@ auto image_generator(string path, int height = 229, int width = 229, int thread_
 
       cv::Size dst_size(height, width);
       cv::Mat dst;
+      double angle = (2.0 * rand() / double(RAND_MAX) - 1.0) * 10.0;
+      double scale = 1.0 + 0.2 * rand() / double(RAND_MAX);
+      cv::Mat matRotation = cv::getRotationMatrix2D(cv::Point(image.cols / 2, image.rows / 2), angle, scale);
+      cv::warpAffine(image, dst, matRotation, image.size());
+      swap(dst, image);
       cv::resize(image, dst, dst_size);
       l[one_hot] = 1.0f;
 
