@@ -69,11 +69,7 @@ int main(int argc, char **argv) {
   ensure(0 == ncclGroupEnd());
   ensure(0 == cudaSetDevice(0));
 
-  // For single-host apps
-  // int devs[ngpus]; for (int i = 0; i < ngpus; ++i) devs[i] = i; ensure(0 == ncclCommInitAll(comms, ngpus, devs));
-
   /* 
-  auto gen = array_generator(CIFAR10_IMAGES, CIFAR10_LABELS);
   auto model = make_shared<InputLayer>("image_place_0", gen->channel, gen->height, gen->width)
     ->then(make_shared<Flatten>())
     ->then(make_shared<Dense>(512))
@@ -86,13 +82,6 @@ int main(int argc, char **argv) {
 
   int batch_size = 64, steps = 50000;
   DeviceEvents events;
-
-  // auto ds = load_images("cifar10"); auto gen = image_generator(ds.first, 32, 32, 8), val_gen = image_generator(ds.second, 32, 32, 1);
-  // auto gen = synthetic_generator(32, 32, 10);
-
-  // auto ds = load_images("catsdogs"); auto gen = iobuff_generator(string("./iobuffexec.py ") + ds.first), val_gen = iobuff_generator(string("./iobuffexec.py ") + ds.second);
-
-  // auto gen = synthetic_generator(224, 224, 2);
 
   float multi_gpu_size = (ngpus * mpi_size);
 
@@ -107,11 +96,11 @@ int main(int argc, char **argv) {
     val_gens[i] = move(image_generator(dataset.second, 224, 224, 1));
   }
 
-  auto img_shape = gens[0]->get_shape();
   for (int i = 0; i < ngpus; ++i) {
     Tensor::activateCurrentDevice(i);
+    auto lchw = gens[i]->get_shape();
     model_replias[i] = lite_dnn::apps::imagenet_resnet50v1::
-      create_model("image_place_0", "label_place_0", {img_shape[1], img_shape[2], img_shape[3]}, img_shape[0]);
+      create_model("image_place_0", "label_place_0", {lchw[1], lchw[2], lchw[3]}, lchw[0]);
 
     if (i == 0) {
       Tensor::activateCurrentDevice(0);
@@ -120,7 +109,7 @@ int main(int argc, char **argv) {
       model_replias[0]->load_weights_from_file("weights.lw");
     }
 
-    optimizors[i] = make_shared<MomentumOptimizor>(model_replias[i], 0.9f, 0.001f, 0.001f);
+    optimizors[i] = make_shared<MomentumOptimizor>(model_replias[i], 0.9f, 0.001f / multi_gpu_size, 0.001f);
     // optimizors[i] = make_shared<SGDOptimizor>(model_replias[i], 0.002f, 0.001f);
   }
 
@@ -171,6 +160,7 @@ int main(int argc, char **argv) {
     }
 
     long total_batch = batch_size * ngpus * mpi_size, metric_frequency = 50, save_frequency = 1000;
+    ensure(save_frequency % metric_frequency == 0);
 
     if (k % metric_frequency == 0 || k == 1) {
       for (int i = 0; i < ngpus; ++i) {
@@ -186,14 +176,17 @@ int main(int argc, char **argv) {
         printf("==> [GPU-%d] step = %d (batch = %ld; %.2lf images/sec): loss = %.4f, acc = %.2f%%, val_loss = %.4f, val_acc = %.2f%%, during = %.2fs\n",
             i, k, total_batch, (k - last_k) * total_batch / during, lacc.first, lacc.second, val_lacc.first, val_lacc.second, during);
       }
+      if (k % save_frequency == 0 || k == steps) {
+        if (mpi_rank == 0) {
+          Tensor::activateCurrentDevice(0);
+          printf("Saving model weights ..\n");
+          model_replias[0]->save_weights_to_file("weights.lw");
+          Tensor::synchronizeCurrentDevice();
+        }
+        MPI_Barrier(MPI_COMM_WORLD);
+      }
       lastClock = get_microseconds(), last_k = k;
     }
-
-    /*if (k % save_frequency == 0 || k == steps) {
-      Tensor::activateCurrentDevice(0);
-      printf("Saving model weights ..\n");
-      model_replias[0]->save_weights_to_file("weights.lw");
-    }*/
   }
 
   for(int i = 0; i < ngpus; ++i)
