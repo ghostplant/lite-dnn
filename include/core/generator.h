@@ -71,6 +71,7 @@ public:
 
   virtual Dataset next_batch(int batch_size) = 0;
   virtual vector<int> get_shape() = 0;
+  virtual size_t recycleBuffer() { return 0; }
 };
 
 void make_dirs(const string &path) {
@@ -175,7 +176,7 @@ auto iobuff_generator(const string &iobuffexec) {
   return make_unique<Generator>(iobuffexec);
 }
 
-auto image_generator(string path, int height = 229, int width = 229, int thread_para = 4) {
+auto image_generator(string path, int height = 224, int width = 224, int thread_para = 4) {
   die_if(thread_para > 32, "Too many thread workers for image_generator: %d.\n", thread_para);
 
   struct Generator: public NormalGenerator {
@@ -242,8 +243,8 @@ auto image_generator(string path, int height = 229, int width = 229, int thread_
 
       printf("\nTotal %d samples found with %d classes for `file://%s`:\n", samples, n_class, path.c_str());
       die_if(!samples, "No valid samples found in directory.");
-      for (int i = 0; i < n_class; ++i)
-        printf("  (*) class %d => %s (%zd samples)\n", i, keyset[i].c_str(), dict[keyset[i]].size());
+      // for (int i = 0; i < n_class; ++i)
+      //   printf("  (*) class %d => %s (%zd samples)\n", i, keyset[i].c_str(), dict[keyset[i]].size());
 
       __sync_add_and_fetch(&activeThread, workers.size());
       for (int i = 0; i < workers.size(); ++i) {
@@ -293,7 +294,7 @@ auto image_generator(string path, int height = 229, int width = 229, int thread_
           pthread_mutex_lock(&workers[rank].m_lock);
           if (workers[rank].q_chw.size() >= cache_size) {
             pthread_mutex_unlock(&workers[rank].m_lock);
-            usleep(50000);
+            usleep(500000);
           } else {
             workers[rank].q_chw.push(move(chw));
             workers[rank].q_l.push(move(l));
@@ -352,8 +353,6 @@ auto image_generator(string path, int height = 229, int width = 229, int thread_
       ensure(CUDA_SUCCESS == cuEventRecord(event, devices[currentDev].hStream));
 
       hostMemBuffer.push_back({event, cudaHostPtr});
-      recycleBuffer();
-
       return move(ds);
     }
 

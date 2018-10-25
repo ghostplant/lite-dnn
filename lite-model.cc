@@ -90,16 +90,24 @@ int main(int argc, char **argv) {
   // auto ds = load_images("cifar10"); auto gen = image_generator(ds.first, 32, 32, 8), val_gen = image_generator(ds.second, 32, 32, 1);
   // auto gen = synthetic_generator(32, 32, 10);
 
-  auto ds = load_images("catsdogs"); auto gen = image_generator(ds.first, 224, 224, 8), val_gen = image_generator(ds.second, 224, 224, 1);
   // auto ds = load_images("catsdogs"); auto gen = iobuff_generator(string("./iobuffexec.py ") + ds.first), val_gen = iobuff_generator(string("./iobuffexec.py ") + ds.second);
 
   // auto gen = synthetic_generator(224, 224, 2);
 
-  vector<shared_ptr<Model>> model_replias(ngpus);
-  vector<shared_ptr<Optimizor>> optimizors(ngpus);
   float multi_gpu_size = (ngpus * mpi_size);
 
-  auto img_shape = gen->get_shape();
+  vector<shared_ptr<Model>> model_replias(ngpus);
+  vector<shared_ptr<Optimizor>> optimizors(ngpus);
+  vector<unique_ptr<NormalGenerator>> gens(ngpus), val_gens(ngpus);
+
+  auto dataset = load_images("cifar10");
+  for (int i = 0; i < ngpus; ++i) {
+    printf("Creating generator for GPU-%d ..\n", i);
+    gens[i] = move(image_generator(dataset.first, 224, 224, 4));
+    val_gens[i] = move(image_generator(dataset.second, 224, 224, 1));
+  }
+
+  auto img_shape = gens[0]->get_shape();
   for (int i = 0; i < ngpus; ++i) {
     Tensor::activateCurrentDevice(i);
     model_replias[i] = lite_dnn::apps::imagenet_resnet50v1::
@@ -112,7 +120,7 @@ int main(int argc, char **argv) {
       model_replias[0]->load_weights_from_file("weights.lw");
     }
 
-    optimizors[i] = make_shared<MomentumOptimizor>(model_replias[i], 0.9f, 0.001f * multi_gpu_size, 0.001f);
+    optimizors[i] = make_shared<MomentumOptimizor>(model_replias[i], 0.9f, 0.001f, 0.001f);
     // optimizors[i] = make_shared<SGDOptimizor>(model_replias[i], 0.002f, 0.001f);
   }
 
@@ -132,25 +140,27 @@ int main(int argc, char **argv) {
   long lastClock = get_microseconds(), last_k = 0;
 
   for (int k = 1; k <= steps; ++k) {
-    vector<Tensor> pred_label;
+    vector<vector<Tensor>> logits_label(ngpus);
 
     for (int i = 0; i < ngpus; ++i) {
       Tensor::activateCurrentDevice(i);
-      auto batch_data = gen->next_batch(batch_size);
+
+      gens[i]->recycleBuffer();
+      auto batch_data = gens[i]->next_batch(batch_size);
       auto feed_dict = unordered_map<string, Tensor>({{"image_place_0", batch_data.images}, {"label_place_0", batch_data.labels}});
 
       auto predicts = model_replias[i]->predict(feed_dict);
       grad[i] = model_replias[i]->collect_all_gradients(feed_dict);
 
-      if (i == 0)
-        pred_label = { predicts, batch_data.labels };
+      logits_label[i] = { predicts, batch_data.labels };
     }
 
     ensure(0 == ncclGroupStart());
     for (int i = 0; i < ngpus; ++i) {
       Tensor::activateCurrentDevice(i);
       for (int j = 0; j < grad[i].size(); ++j) {
-        ensure(0 == ncclAllReduce((const void*)grad[i][j].d_data->get(), (void*)grad[i][j].d_data->get(), grad[i][j].count(), ncclFloat, ncclSum, comms[i], devices[currentDev].hStream));
+        ensure(0 == ncclAllReduce((const void*)grad[i][j].d_data->get(),
+          (void*)grad[i][j].d_data->get(), grad[i][j].count(), ncclFloat, ncclSum, comms[i], devices[currentDev].hStream));
       }
     }
     ensure(0 == ncclGroupEnd());
@@ -160,34 +170,30 @@ int main(int argc, char **argv) {
       optimizors[i]->apply_updates(grad[i]);
     }
 
-    Tensor::activateCurrentDevice(0);
-
-    if (mpi_rank != 0)
-      continue;
-
     long total_batch = batch_size * ngpus * mpi_size, metric_frequency = 50, save_frequency = 1000;
-    long currClock = get_microseconds();
 
     if (k % metric_frequency == 0 || k == 1) {
-      auto lacc = pred_label[0].get_loss_and_accuracy_with(pred_label[1]);
+      for (int i = 0; i < ngpus; ++i) {
+        Tensor::activateCurrentDevice(i);
+        auto lacc = logits_label[i][0].get_loss_and_accuracy_with(logits_label[i][1]);
 
-      auto val_batch_data = val_gen->next_batch(batch_size);
-      auto val_predicts = model_replias[0]->predict({{"image_place_0", val_batch_data.images}});
-      auto val_lacc = val_predicts.get_loss_and_accuracy_with(val_batch_data.labels);
+        val_gens[i]->recycleBuffer();
+        auto val_batch_data = val_gens[i]->next_batch(batch_size);
+        auto val_predicts = model_replias[i]->predict({{"image_place_0", val_batch_data.images}});
+        auto val_lacc = val_predicts.get_loss_and_accuracy_with(val_batch_data.labels);
 
-      double during = (currClock - lastClock) * 1e-6f;
-
-      printf("==> step = %d (batch = %ld; %.2lf images/sec): loss = %.4f, acc = %.2f%%, val_loss = %.4f, val_acc = %.2f%%, during = %.2fs\n",
-          k, total_batch, (k - last_k) * total_batch / during, lacc.first, lacc.second, val_lacc.first, val_lacc.second, during);
-
-      lastClock = currClock, last_k = k;
+        double during = (get_microseconds() - lastClock) * 1e-6f;
+        printf("==> [GPU-%d] step = %d (batch = %ld; %.2lf images/sec): loss = %.4f, acc = %.2f%%, val_loss = %.4f, val_acc = %.2f%%, during = %.2fs\n",
+            i, k, total_batch, (k - last_k) * total_batch / during, lacc.first, lacc.second, val_lacc.first, val_lacc.second, during);
+      }
+      lastClock = get_microseconds(), last_k = k;
     }
 
-    if (k % save_frequency == 0 || k == steps) {
+    /*if (k % save_frequency == 0 || k == steps) {
       Tensor::activateCurrentDevice(0);
       printf("Saving model weights ..\n");
       model_replias[0]->save_weights_to_file("weights.lw");
-    }
+    }*/
   }
 
   for(int i = 0; i < ngpus; ++i)
