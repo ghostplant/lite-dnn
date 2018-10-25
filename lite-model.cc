@@ -48,8 +48,9 @@ static inline unsigned long get_microseconds() {
 
 
 int main(int argc, char **argv) {
-  const int ngpus = Tensor::init();
+  int ngpus = 1;
 
+  Tensor::init();
   ensure(MPI_SUCCESS == MPI_Init(&argc, &argv));
   int mpi_size, mpi_rank;
   MPI_Comm_size(MPI_COMM_WORLD, &mpi_size);
@@ -99,7 +100,7 @@ int main(int argc, char **argv) {
   for (int i = 0; i < ngpus; ++i) {
     Tensor::activateCurrentDevice(i);
     auto lchw = gens[i]->get_shape();
-    model_replias[i] = lite_dnn::apps::imagenet_resnet50v1::
+    model_replias[i] = lite_dnn::apps::imagenet_alexnet::
       create_model("image_place_0", "label_place_0", {lchw[1], lchw[2], lchw[3]}, lchw[0]);
 
     if (i == 0) {
