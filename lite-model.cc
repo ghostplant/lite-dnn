@@ -97,6 +97,7 @@ int main(int argc, char **argv) {
 
   vector<shared_ptr<Model>> model_replias(ngpus);
   vector<shared_ptr<Optimizor>> optimizors(ngpus);
+  float multi_gpu_size = (ngpus * mpi_size);
 
   auto img_shape = gen->get_shape();
   for (int i = 0; i < ngpus; ++i) {
@@ -111,29 +112,24 @@ int main(int argc, char **argv) {
       model_replias[0]->load_weights_from_file("weights.lw");
     }
 
-    optimizors[i] = make_shared<MomentumOptimizor>(model_replias[i], 0.9f, 0.001f, 0.001f);
+    optimizors[i] = make_shared<MomentumOptimizor>(model_replias[i], 0.9f, 0.001f * multi_gpu_size, 0.001f);
     // optimizors[i] = make_shared<SGDOptimizor>(model_replias[i], 0.002f, 0.001f);
   }
 
-  vector<vector<Tensor>> weights(ngpus), grad_reduce(ngpus), grad(ngpus);
   Tensor::activateCurrentDevice(0);
-  weights[0] = model_replias[0]->collect_all_weights();
+  vector<Tensor> weights = model_replias[0]->collect_all_weights();
+
+  vector<vector<Tensor>> grad(ngpus);
   for (int j = 1; j < ngpus; ++j) {
-    weights[j] = model_replias[j]->collect_all_weights();
-    for (int i = 0; i < weights[0].size(); ++i)
-      weights[0][i].copyTo(weights[j][i]);
+    auto weights_peer = model_replias[j]->collect_all_weights();
+    for (int i = 0; i < weights.size(); ++i) {
+      weights[i].copyTo(weights_peer[i]);
+      assert(weights[i].get_data() == weights_peer[i].get_data());
+    }
   }
   Tensor::synchronizeCurrentDevice();
 
-  for (int i = 0; i < ngpus; ++i) {
-    Tensor::activateCurrentDevice(i);
-    grad_reduce[i].resize(weights[i].size());
-    for (int j = 0; j < weights[i].size(); ++j)
-      grad_reduce[i][j] = Tensor(weights[i][j].shape);
-  }
-
   long lastClock = get_microseconds(), last_k = 0;
-  float avg_ceof = 1.0f / (ngpus * mpi_size);
 
   for (int k = 1; k <= steps; ++k) {
     vector<Tensor> pred_label;
@@ -146,9 +142,6 @@ int main(int argc, char **argv) {
       auto predicts = model_replias[i]->predict(feed_dict);
       grad[i] = model_replias[i]->collect_all_gradients(feed_dict);
 
-      for (int j = 0; j < grad[i].size(); ++j)
-        grad[i][j].self_mul(avg_ceof);
-
       if (i == 0)
         pred_label = { predicts, batch_data.labels };
     }
@@ -156,15 +149,15 @@ int main(int argc, char **argv) {
     ensure(0 == ncclGroupStart());
     for (int i = 0; i < ngpus; ++i) {
       Tensor::activateCurrentDevice(i);
-      for (int j = 0; j < grad_reduce[i].size(); ++j) {
-        ensure(0 == ncclAllReduce((const void*)grad[i][j].d_data->get(), (void*)grad_reduce[i][j].d_data->get(), grad_reduce[i][j].count(), ncclFloat, ncclSum, comms[i], devices[currentDev].hStream));
+      for (int j = 0; j < grad[i].size(); ++j) {
+        ensure(0 == ncclAllReduce((const void*)grad[i][j].d_data->get(), (void*)grad[i][j].d_data->get(), grad[i][j].count(), ncclFloat, ncclSum, comms[i], devices[currentDev].hStream));
       }
     }
     ensure(0 == ncclGroupEnd());
 
     for (int i = 0; i < ngpus; ++i) {
       Tensor::activateCurrentDevice(i);
-      optimizors[i]->apply_updates(grad_reduce[i]);
+      optimizors[i]->apply_updates(grad[i]);
     }
 
     Tensor::activateCurrentDevice(0);
