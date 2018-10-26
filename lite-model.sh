@@ -11,5 +11,6 @@ MPI_HOST_NUM=$(echo "${HOSTS}" | tr \, \\n | wc -l)
 IFNAME=${IFNAME:-enp216s0}
 
 LD_LIBRARY_PATH=/usr/local/cuda/lib64:$LD_LIBRARY_PATH exec mpiexec --allow-run-as-root --bind-to none \
+    --mca btl_openib_warn_no_device_params_found 0 \
     --mca oob_tcp_if_include ${IFNAME} --mca btl_tcp_if_include ${IFNAME} -x NCCL_SOCKET_IFNAME=${IFNAME} \
     --map-by slot -np ${MPI_HOST_NUM} --host ${HOSTS} ./lite-model "$@" 2>/dev/null

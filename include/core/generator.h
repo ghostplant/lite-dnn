@@ -161,14 +161,11 @@ public:
 
 
   void background_generator(int rank) {
-    unsigned int seed = rank, mpi_rank = 0;
-    const char *mpi_rank_env = getenv("OMPI_COMM_WORLD_RANK");
-    if (mpi_rank_env)
-      mpi_rank = atoi(mpi_rank_env);
-    seed ^= mpi_rank << 16;
+    unsigned int seed = mpi_rank * workers.size() + rank;
     // printf("Generating with seed: %u\n", seed);
 
     size_t split = batch_size * channel * height * width, tail = split + batch_size * n_class;
+    ensure(cudaSuccess == cudaSetDevice(mpi_localrank));
 
     while (1) {
       float *hostPtr = hostMem->allocate(tail), *hostSplit = hostPtr + split;
@@ -289,7 +286,7 @@ public:
     float *b = chw, *g = b + height * width, *r = g + height * width;
     for (int h = 0; h < height; ++h) {
       for (int w = 0; w < width; ++w) {
-        *b++ = *ptr++ / 255.0f, *g++ = *ptr++ / 255.0f, *r++ = *ptr++ / 255.0f;
+        *r++ = *ptr++ / 255.0f, *g++ = *ptr++ / 255.0f, *b++ = *ptr++ / 255.0f;
       }
     }
     return true;

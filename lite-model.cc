@@ -66,7 +66,8 @@ int main(int argc, char **argv) {
   auto gen = make_shared<ImageDataGenerator>(dataset.first, 224, 224, 4, batch_size);
   auto val_gen = make_shared<ImageDataGenerator>(dataset.second, 224, 224, 1, batch_size);
 
-  auto model_replias = lite_dnn::apps::imagenet_resnet50v1::create_model("image_place_0", "label_place_0", {gen->channel, gen->height, gen->width}, gen->n_class);
+  auto model_replias = lite_dnn::apps::imagenet_alexnet::create_model(
+    "image_place_0", "label_place_0", {gen->channel, gen->height, gen->width}, gen->n_class);
   auto optimizor = make_shared<MomentumOptimizor>(model_replias, 0.9f, 0.001f / mpi_size, 0.001f);
 
   if (mpi_rank == 0)
