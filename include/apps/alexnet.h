@@ -28,10 +28,10 @@ namespace lite_dnn {
         ->then(make_shared<Flatten>())
         ->then(make_shared<Dense>(4096))
         ->then(make_shared<Activation>(CUDNN_ACTIVATION_RELU))
-        ->then(make_shared<Dropout>(0.25))
+        // ->then(make_shared<Dropout>(0.25))
         ->then(make_shared<Dense>(4096))
         ->then(make_shared<Activation>(CUDNN_ACTIVATION_RELU))
-        ->then(make_shared<Dropout>(0.25))
+        // ->then(make_shared<Dropout>(0.25))
         ->then(make_shared<Dense>(n_class))
         ->then(make_shared<SoftmaxCrossEntropy>(label_ph));
 

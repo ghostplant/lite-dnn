@@ -88,20 +88,19 @@ int main(int argc, char **argv) {
 
   vector<shared_ptr<Model>> model_replias(ngpus);
   vector<shared_ptr<Optimizor>> optimizors(ngpus);
-  vector<unique_ptr<NormalGenerator>> gens(ngpus), val_gens(ngpus);
+  vector<shared_ptr<ImageDataGenerator>> gens(ngpus), val_gens(ngpus);
 
   auto dataset = load_images("cifar10");
   for (int i = 0; i < ngpus; ++i) {
     printf("Creating generator for GPU-%d ..\n", i);
-    gens[i] = move(image_generator(dataset.first, 224, 224, 4));
-    val_gens[i] = move(image_generator(dataset.second, 224, 224, 1));
+    gens[i] = make_shared<ImageDataGenerator>(dataset.first, 224, 224, 4, batch_size);
+    val_gens[i] = make_shared<ImageDataGenerator>(dataset.second, 224, 224, 1, batch_size);
   }
 
   for (int i = 0; i < ngpus; ++i) {
     Tensor::activateCurrentDevice(i);
-    auto lchw = gens[i]->get_shape();
     model_replias[i] = lite_dnn::apps::imagenet_alexnet::
-      create_model("image_place_0", "label_place_0", {lchw[1], lchw[2], lchw[3]}, lchw[0]);
+      create_model("image_place_0", "label_place_0", {gens[i]->channel, gens[i]->height, gens[i]->width}, gens[i]->n_class);
 
     if (i == 0) {
       Tensor::activateCurrentDevice(0);
@@ -137,12 +136,12 @@ int main(int argc, char **argv) {
 
       gens[i]->recycleBuffer();
       auto batch_data = gens[i]->next_batch(batch_size);
-      auto feed_dict = unordered_map<string, Tensor>({{"image_place_0", batch_data.images}, {"label_place_0", batch_data.labels}});
+      auto feed_dict = unordered_map<string, Tensor>({{"image_place_0", batch_data[0]}, {"label_place_0", batch_data[1]}});
 
       auto predicts = model_replias[i]->predict(feed_dict);
       grad[i] = model_replias[i]->collect_all_gradients(feed_dict);
 
-      logits_label[i] = { predicts, batch_data.labels };
+      logits_label[i] = { predicts, batch_data[1] };
     }
 
     ensure(0 == ncclGroupStart());
@@ -170,8 +169,8 @@ int main(int argc, char **argv) {
 
         val_gens[i]->recycleBuffer();
         auto val_batch_data = val_gens[i]->next_batch(batch_size);
-        auto val_predicts = model_replias[i]->predict({{"image_place_0", val_batch_data.images}});
-        auto val_lacc = val_predicts.get_loss_and_accuracy_with(val_batch_data.labels);
+        auto val_predicts = model_replias[i]->predict({{"image_place_0", val_batch_data[0]}});
+        auto val_lacc = val_predicts.get_loss_and_accuracy_with(val_batch_data[1]);
 
         double during = (get_microseconds() - lastClock) * 1e-6f;
         printf("==> [GPU-%d] step = %d (batch = %ld; %.2lf images/sec): loss = %.4f, acc = %.2f%%, val_loss = %.4f, val_acc = %.2f%%, during = %.2fs\n",

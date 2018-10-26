@@ -13,26 +13,25 @@ class MemoryManager {
 
   unordered_map<unsigned int, vector<void*>> resources;
   unordered_map<void*, unsigned int> buffsize;
+  pthread_mutex_t m_lock;
 
 public:
   MemoryManager(void* (*mem_alloc)(size_t), void (*mem_free)(void*)) {
     this->mem_alloc = mem_alloc;
     this->mem_free = mem_free;
+    pthread_mutex_init(&m_lock, 0);
   }
 
   ~MemoryManager() {
-    clear();
-  }
-
-  void clear() {
     for (auto &it: resources)
       for (auto &ptr: it.second)
         mem_free(ptr);
     resources.clear();
     buffsize.clear();
+    pthread_mutex_destroy(&m_lock);
   }
 
-  void* allocate(unsigned int floatCnt) {
+  float* allocate(unsigned int floatCnt) {
     ensure(floatCnt > 0);
     --floatCnt;
     floatCnt |= floatCnt >> 1;
@@ -42,25 +41,263 @@ public:
     floatCnt |= floatCnt >> 16;
     ++floatCnt;
 
-    void *memptr;
+    pthread_mutex_lock(&m_lock);
+    float *memptr;
     auto it = resources.find(floatCnt);
     if (it != resources.end() && it->second.size() > 0) {
-      memptr = it->second.back();
+      memptr = (float*)it->second.back();
       it->second.pop_back();
     } else {
-      memptr = mem_alloc(size_t(floatCnt) * sizeof(float));
+      memptr = (float*)mem_alloc(size_t(floatCnt) * sizeof(float));
       buffsize[memptr] = floatCnt;
     }
+    pthread_mutex_unlock(&m_lock);
     return memptr;
   }
 
-  void free(void *memptr) {
+  void free(float *memptr) {
+    pthread_mutex_lock(&m_lock);
     ensure(buffsize.count(memptr) > 0);
     unsigned int floatCnt = buffsize[memptr];
     resources[floatCnt].push_back(memptr);
+    pthread_mutex_unlock(&m_lock);
   }
 };
 
+
+void make_dirs(const string &path) {
+  die_if(path.back() != '/', "Directory path must end with '/'.");
+  int it = path.find('/', 1);
+  while (it >= 0) {
+    mkdir(path.substr(0, it).c_str(), 0755);
+    it = path.find('/', it + 1);
+  }
+}
+
+
+class ImageDataGenerator {
+public:
+  unordered_map<string, vector<string>> dict;
+  vector<string> keyset;
+  int n_class, channel, height, width;
+
+  struct Worker {
+    pthread_t tid;
+    pthread_mutex_t m_lock;
+    queue<float*> q_chw;
+  };
+
+  vector<Worker> workers;
+  bool threadStop;
+  int cache_size, batch_size, next_iter;
+
+  vector<pair<CUevent, float*>> hostMemBuffer;
+  MemoryManager *hostMem;
+
+  ImageDataGenerator(string path, int height, int width, int thread_para, int batch_size): height(height), width(width), channel(3),
+      workers(thread_para), batch_size(batch_size), next_iter(0) {
+    if (path.size() > 0 && path[path.size() - 1] != '/')
+      path += '/';
+
+    hostMem = new MemoryManager([](size_t bytes) -> void* {
+      void *cudaHostPtr = nullptr;
+      ensure(cudaSuccess == cudaHostAlloc(&cudaHostPtr, bytes, 0));
+      return cudaHostPtr;
+    }, [](void *cudaHostPtr) {
+      ensure(cudaSuccess == cudaFree(cudaHostPtr));
+    });
+    ensure(hostMem != nullptr);
+
+    threadStop = false;
+    cache_size = 4;
+
+    dirent *ep, *ch_ep;
+    DIR *root = opendir(path.c_str());
+    die_if(root == nullptr, "Cannot open directory of path: %s.", path.c_str());
+
+    while ((ep = readdir(root)) != nullptr) {
+      if (!ep->d_name[0] || !strcmp(ep->d_name, ".") || !strcmp(ep->d_name, ".."))
+        continue;
+      string sub_dir = path + ep->d_name + "/";
+      DIR *child = opendir(sub_dir.c_str());
+      if (child == nullptr)
+        continue;
+      while ((ch_ep = readdir(child)) != nullptr) {
+        if (!ch_ep->d_name[0] || !strcmp(ch_ep->d_name, ".") || !strcmp(ch_ep->d_name, ".."))
+          continue;
+        dict[sub_dir].push_back(ch_ep->d_name);
+      }
+      closedir(child);
+    }
+    closedir(root);
+
+    int samples = 0;
+    for (auto &it: dict) {
+      keyset.push_back(it.first);
+      sort(keyset.begin(), keyset.end());
+      samples += it.second.size();
+    }
+    n_class = keyset.size();
+
+    printf("\nTotal %d samples found with %d classes for `file://%s`:\n", samples, n_class, path.c_str());
+    die_if(!samples, "No valid samples found in directory.");
+    // for (int i = 0; i < n_class; ++i)
+    //   printf("  (*) class %d => %s (%zd samples)\n", i, keyset[i].c_str(), dict[keyset[i]].size());
+
+    __sync_add_and_fetch(&activeThread, workers.size());
+    for (int i = 0; i < workers.size(); ++i) {
+      pthread_mutex_init(&workers[i].m_lock, 0);
+      pthread_create(&workers[i].tid, NULL, ImageDataGenerator::start, new pair<ImageDataGenerator*, int>(this, i));
+    }
+  }
+
+  ~ImageDataGenerator() {
+    threadStop = true;
+    for (auto &worker: workers) {
+      pthread_join(worker.tid, nullptr);
+      pthread_mutex_destroy(&worker.m_lock);
+    }
+  }
+
+
+  void background_generator(int rank) {
+    unsigned int seed = rank, mpi_rank = 0;
+    const char *mpi_rank_env = getenv("OMPI_COMM_WORLD_RANK");
+    if (mpi_rank_env)
+      mpi_rank = atoi(mpi_rank_env);
+    seed ^= mpi_rank << 16;
+    // printf("Generating with seed: %u\n", seed);
+
+    size_t split = batch_size * channel * height * width, tail = split + batch_size * n_class;
+
+    while (1) {
+      float *hostPtr = hostMem->allocate(tail), *hostSplit = hostPtr + split;
+      memset(hostSplit, 0, sizeof(float) * (tail - split));
+
+      for (int i = 0; i < batch_size; ++i) {
+        float *image = hostPtr + i * channel * height * width;
+        float *label = hostSplit + i * n_class;
+        while (1) {
+          int c = u_rand(&seed) % dict.size(); // rand_r(&seed)
+          auto &files = dict[keyset[c]];
+          if (files.size() == 0)
+            continue;
+          int it = u_rand(&seed) % files.size(); // rand_r(&seed)
+          if (get_image_data(keyset[c] + files[it], image, c, label, seed))
+            break;
+        }
+      }
+
+      while (1) {
+        if (threadStop || globalStop) {
+          // On Exit
+          while (recycleBuffer())
+            ;
+          delete hostMem;
+          __sync_add_and_fetch(&activeThread, -1);
+          return;
+        }
+        pthread_mutex_lock(&workers[rank].m_lock);
+        if (workers[rank].q_chw.size() >= cache_size) {
+          pthread_mutex_unlock(&workers[rank].m_lock);
+          usleep(500000);
+        } else {
+          workers[rank].q_chw.push(hostPtr);
+          pthread_mutex_unlock(&workers[rank].m_lock);
+          break;
+        }
+      }
+    }
+  }
+
+  vector<Tensor> next_batch(int batch_size) {
+    size_t split = batch_size * channel * height * width, tail = split + batch_size * keyset.size();
+    ensure(this->batch_size == batch_size);
+
+    int i = next_iter;
+    next_iter = (next_iter + 1) % workers.size();
+
+    float *hostPtr = nullptr;
+    while (1) {
+      pthread_mutex_lock(&workers[i].m_lock);
+      if (workers[i].q_chw.size() == 0) {
+        pthread_mutex_unlock(&workers[i].m_lock);
+        continue;
+      }
+      hostPtr = workers[i].q_chw.front();
+      workers[i].q_chw.pop();
+      pthread_mutex_unlock(&workers[i].m_lock);
+      break;
+    }
+
+    vector<Tensor> dataset = {
+      Tensor({batch_size, channel, height, width}),
+      Tensor({batch_size, n_class})
+    };
+    dataset[0].set_data(hostPtr, false);
+    dataset[1].set_data(hostPtr + split, true);
+
+    /*CUevent event;
+    ensure(CUDA_SUCCESS == cuEventCreate(&event, CU_EVENT_DISABLE_TIMING));
+    ensure(CUDA_SUCCESS == cuEventRecord(event, devices[currentDev].hStream));
+
+    hostMemBuffer.push_back({event, cudaHostPtr});*/
+    hostMem->free(hostPtr);
+    return move(dataset);
+  }
+
+  size_t recycleBuffer() {
+    for (int i = 0; i < hostMemBuffer.size(); ++i) {
+      CUresult res = cuEventQuery(hostMemBuffer[i].first);
+      if (res == CUDA_SUCCESS) {
+        ensure(CUDA_SUCCESS == cuEventDestroy(hostMemBuffer[i].first));
+        hostMem->free(hostMemBuffer[i].second);
+        hostMemBuffer[i] = hostMemBuffer.back();
+        hostMemBuffer.pop_back();
+        --i;
+      } else
+       ensure(res == CUDA_ERROR_NOT_READY);
+    }
+    return hostMemBuffer.size();
+  }
+
+  static void *start(void *args) {
+    auto data = (pair<ImageDataGenerator*, int>*)args;
+    ImageDataGenerator* object = data->first;
+    int rank = data->second;
+    delete data;
+    object->background_generator(rank);
+    return NULL;
+  }
+
+  bool get_image_data(const string &image_path, float *chw, int one_hot, float *l, unsigned int &seed) {
+    cv::Mat image = cv::imread(image_path, 1);
+    if (image.data == nullptr)
+      return false;
+
+    cv::Size dst_size(height, width);
+    cv::Mat dst;
+    double angle = (2.0 * u_rand(&seed) / double(RAND_MAX) - 1.0) * 10.0;
+    double scale = 1.0 + 0.2 * u_rand(&seed) / double(RAND_MAX);
+    cv::Mat matRotation = cv::getRotationMatrix2D(cv::Point(image.cols / 2, image.rows / 2), angle, scale);
+    cv::warpAffine(image, dst, matRotation, image.size());
+    swap(dst, image);
+    cv::resize(image, dst, dst_size);
+    l[one_hot] = 1.0f;
+
+    uint8_t *ptr = dst.data;
+    float *b = chw, *g = b + height * width, *r = g + height * width;
+    for (int h = 0; h < height; ++h) {
+      for (int w = 0; w < width; ++w) {
+        *b++ = *ptr++ / 255.0f, *g++ = *ptr++ / 255.0f, *r++ = *ptr++ / 255.0f;
+      }
+    }
+    return true;
+  }
+};
+
+
+/*
 
 class NormalGenerator {
 
@@ -73,16 +310,6 @@ public:
   virtual vector<int> get_shape() = 0;
   virtual size_t recycleBuffer() { return 0; }
 };
-
-void make_dirs(const string &path) {
-  die_if(path.back() != '/', "Directory path must end with '/'.");
-  int it = path.find('/', 1);
-  while (it >= 0) {
-    mkdir(path.substr(0, it).c_str(), 0755);
-    it = path.find('/', it + 1);
-  }
-}
-
 
 auto synthetic_generator(int height, int width, int n_class, int channel = 3) {
 
@@ -105,7 +332,6 @@ auto synthetic_generator(int height, int width, int n_class, int channel = 3) {
   };
   return make_unique<Generator>(height, width, n_class, channel);
 }
-
 
 auto iobuff_generator(const string &iobuffexec) {
 
@@ -174,246 +400,6 @@ auto iobuff_generator(const string &iobuffexec) {
   };
 
   return make_unique<Generator>(iobuffexec);
-}
-
-auto image_generator(string path, int height = 224, int width = 224, int thread_para = 4) {
-  die_if(thread_para > 32, "Too many thread workers for image_generator: %d.\n", thread_para);
-
-  struct Generator: public NormalGenerator {
-    unordered_map<string, vector<string>> dict;
-    vector<string> keyset;
-    int n_class, channel, height, width;
-
-    struct Worker {
-      pthread_t tid;
-      pthread_mutex_t m_lock;
-      queue<vector<float>> q_chw, q_l;
-    };
-
-    vector<Worker> workers;
-    bool threadStop;
-    int cache_size;
-
-    vector<pair<CUevent, void*>> hostMemBuffer;
-    MemoryManager *hostMem;
-
-    Generator(const string &path, int height, int width, int thread_para): height(height), width(width), channel(3),
-        workers(thread_para) {
-
-      hostMem = new MemoryManager([](size_t bytes) -> void* {
-        void *cudaHostPtr = nullptr;
-        ensure(CUDA_SUCCESS == cuMemHostAlloc(&cudaHostPtr, bytes, 0));
-        return cudaHostPtr;
-      }, [](void *cudaHostPtr) {
-        ensure(CUDA_SUCCESS == cuMemFreeHost(cudaHostPtr));
-      });
-      ensure(hostMem != nullptr);
-
-      threadStop = false;
-      cache_size = (1U << 30) / thread_para / (height * width * channel * sizeof(float));
-      cache_size = max(1024, min(cache_size, (1 << 20)));
-
-      dirent *ep, *ch_ep;
-      DIR *root = opendir(path.c_str());
-      die_if(root == nullptr, "Cannot open directory of path: %s.", path.c_str());
-
-      while ((ep = readdir(root)) != nullptr) {
-        if (!ep->d_name[0] || !strcmp(ep->d_name, ".") || !strcmp(ep->d_name, ".."))
-          continue;
-        string sub_dir = path + ep->d_name + "/";
-        DIR *child = opendir(sub_dir.c_str());
-        if (child == nullptr)
-          continue;
-        while ((ch_ep = readdir(child)) != nullptr) {
-          if (!ch_ep->d_name[0] || !strcmp(ch_ep->d_name, ".") || !strcmp(ch_ep->d_name, ".."))
-            continue;
-          dict[sub_dir].push_back(ch_ep->d_name);
-        }
-        closedir(child);
-      }
-      closedir(root);
-
-      int samples = 0;
-      for (auto &it: dict) {
-        keyset.push_back(it.first);
-        sort(keyset.begin(), keyset.end());
-        samples += it.second.size();
-      }
-      n_class = keyset.size();
-
-      printf("\nTotal %d samples found with %d classes for `file://%s`:\n", samples, n_class, path.c_str());
-      die_if(!samples, "No valid samples found in directory.");
-      // for (int i = 0; i < n_class; ++i)
-      //   printf("  (*) class %d => %s (%zd samples)\n", i, keyset[i].c_str(), dict[keyset[i]].size());
-
-      __sync_add_and_fetch(&activeThread, workers.size());
-      for (int i = 0; i < workers.size(); ++i) {
-        pthread_mutex_init(&workers[i].m_lock, 0);
-        pthread_create(&workers[i].tid, NULL, Generator::start, new pair<Generator*, int>(this, i));
-      }
-    }
-
-    ~Generator() {
-      threadStop = true;
-      for (auto &worker: workers) {
-        pthread_join(worker.tid, nullptr);
-        pthread_mutex_destroy(&worker.m_lock);
-      }
-    }
-
-
-    void background_generator(int rank) {
-      unsigned int seed = rank, mpi_rank = 0;
-      const char *mpi_rank_env = getenv("OMPI_COMM_WORLD_RANK");
-      if (mpi_rank_env)
-        mpi_rank = atoi(mpi_rank_env);
-      seed ^= mpi_rank << 16;
-      // printf("Generating with seed: %u\n", seed);
-
-      while (1) {
-        vector<float> chw(channel * height * width), l(n_class, 0.0f);
-        while (1) {
-          int c = u_rand(&seed) % dict.size(); // rand_r(&seed)
-          auto &files = dict[keyset[c]];
-          if (files.size() == 0)
-            continue;
-          int it = u_rand(&seed) % files.size(); // rand_r(&seed)
-          if (get_image_data(keyset[c] + files[it], chw.data(), c, l.data()))
-            break;
-        }
-
-        while (1) {
-          if (threadStop || globalStop) {
-            // On Exit
-            while (recycleBuffer())
-              ;
-            delete hostMem;
-            __sync_add_and_fetch(&activeThread, -1);
-            return;
-          }
-          pthread_mutex_lock(&workers[rank].m_lock);
-          if (workers[rank].q_chw.size() >= cache_size) {
-            pthread_mutex_unlock(&workers[rank].m_lock);
-            usleep(500000);
-          } else {
-            workers[rank].q_chw.push(move(chw));
-            workers[rank].q_l.push(move(l));
-            pthread_mutex_unlock(&workers[rank].m_lock);
-            break;
-          }
-        }
-      }
-    }
-
-    NormalGenerator::Dataset next_batch(int batch_size) {
-      size_t split = batch_size * channel * height * width, tail = split + batch_size * keyset.size();
-
-      void *cudaHostPtr = hostMem->allocate(tail);
-
-      ensure(cache_size * workers.size() >= batch_size);
-      int para = workers.size();
-      int batch_each = batch_size / para, batch_extra = batch_size % para;
-
-      int offset = 0, rest = 0;
-      for (int i = 0; i < para; ++i) {
-        rest += batch_each + (i < batch_extra);
-        while (offset < rest) {
-          vector<vector<float>> f_chw, f_l;
-          pthread_mutex_lock(&workers[i].m_lock);
-          while (f_chw.size() < rest - offset && workers[i].q_chw.size()) {
-            f_chw.push_back(move(workers[i].q_chw.front()));
-            f_l.push_back(move(workers[i].q_l.front()));
-            workers[i].q_chw.pop();
-            workers[i].q_l.pop();
-          }
-          pthread_mutex_unlock(&workers[i].m_lock);
-
-          while (f_chw.size()) {
-            float *images = ((float*)cudaHostPtr) + (channel * height * width) * offset;
-            float *labels = ((float*)cudaHostPtr) + split + (n_class) * offset;
-            memcpy(images, f_chw.back().data(), (channel * height * width) * sizeof(float));
-            memcpy(labels, f_l.back().data(), (n_class) * sizeof(float));
-            f_chw.pop_back();
-            f_l.pop_back();
-            ++offset;
-          }
-        }
-      }
-      ensure(offset == batch_size);
-
-      auto ds = NormalGenerator::Dataset({
-        Tensor({batch_size, channel, height, width}),
-        Tensor({batch_size, n_class})
-      });
-      ds.images.set_data(((float*)cudaHostPtr), false);
-      ds.labels.set_data(((float*)cudaHostPtr) + split, false);
-
-      CUevent event;
-      ensure(CUDA_SUCCESS == cuEventCreate(&event, CU_EVENT_DISABLE_TIMING));
-      ensure(CUDA_SUCCESS == cuEventRecord(event, devices[currentDev].hStream));
-
-      hostMemBuffer.push_back({event, cudaHostPtr});
-      return move(ds);
-    }
-
-    size_t recycleBuffer() {
-      for (int i = 0; i < hostMemBuffer.size(); ++i) {
-        CUresult res = cuEventQuery(hostMemBuffer[i].first);
-        if (res == CUDA_SUCCESS) {
-          ensure(CUDA_SUCCESS == cuEventDestroy(hostMemBuffer[i].first));
-          hostMem->free(hostMemBuffer[i].second);
-          hostMemBuffer[i] = hostMemBuffer.back();
-          hostMemBuffer.pop_back();
-          --i;
-        } else
-         ensure(res == CUDA_ERROR_NOT_READY);
-      }
-      return hostMemBuffer.size();
-    }
-
-
-    static void *start(void *args) {
-      auto data = (pair<Generator*, int>*)args;
-      Generator* object = data->first;
-      int rank = data->second;
-      delete data;
-      object->background_generator(rank);
-      return NULL;
-    }
-
-    bool get_image_data(const string &image_path, float *chw, int one_hot, float *l) {
-      cv::Mat image = cv::imread(image_path, 1);
-      if (image.data == nullptr)
-        return false;
-
-      cv::Size dst_size(height, width);
-      cv::Mat dst;
-      double angle = (2.0 * rand() / double(RAND_MAX) - 1.0) * 10.0;
-      double scale = 1.0 + 0.2 * rand() / double(RAND_MAX);
-      cv::Mat matRotation = cv::getRotationMatrix2D(cv::Point(image.cols / 2, image.rows / 2), angle, scale);
-      cv::warpAffine(image, dst, matRotation, image.size());
-      swap(dst, image);
-      cv::resize(image, dst, dst_size);
-      l[one_hot] = 1.0f;
-
-      uint8_t *ptr = dst.data;
-      float *b = chw, *g = b + height * width, *r = g + height * width;
-      for (int h = 0; h < height; ++h) {
-        for (int w = 0; w < width; ++w) {
-          *b++ = *ptr++ / 255.0f, *g++ = *ptr++ / 255.0f, *r++ = *ptr++ / 255.0f;
-        }
-      }
-      return true;
-    }
-
-    vector<int> get_shape() {
-      return {n_class, channel, height, width};
-    }
-  };
-
-  if (path.size() > 0 && path[path.size() - 1] != '/')
-    path += '/';
-  return make_unique<Generator>(path, height, width, thread_para);
 }
 
 auto array_generator(const char* images_ubyte, const char* labels_ubyte) {
@@ -599,3 +585,4 @@ auto array_generator(const char* images_ubyte, const char* labels_ubyte) {
   printf("Total %d samples found with %d classes.\n", gen->n_sample, gen->n_class);
   return move(gen);
 }
+*/
