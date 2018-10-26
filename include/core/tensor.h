@@ -33,60 +33,72 @@ struct DeviceResources {
 static vector<DeviceResources> devices;
 
 static vector<unordered_map<size_t, vector<void*>>> cached_mem;
-static cudnnHandle_t cudnnHandle;
-static cublasHandle_t cublasHandle;
 static int currentDev = -1, globalStop;
 static volatile int activeThread = 0;
 
+
+static int mpi_size, mpi_rank, mpi_localrank;
+static ncclComm_t comm;
 
 class Tensor {
 
 public:
   // Global Tensor Funtions
 
-  static int init() {
-    int devCount = 0;
+  static void init() {
+    ensure(MPI_SUCCESS == MPI_Init(0, 0));
+    MPI_Comm_size(MPI_COMM_WORLD, &mpi_size);
+    MPI_Comm_rank(MPI_COMM_WORLD, &mpi_rank);
 
+    const char *localrank = getenv("OMPI_COMM_WORLD_LOCAL_RANK");
+    die_if(mpi_size > 1 && localrank == nullptr, "Only OpenMPI is supported for this application.");
+    mpi_localrank = localrank ? atoi(localrank) : 0;
+
+    int devCount = 0;
     ensure(CUDA_SUCCESS == cuInit(0));
     ensure(CUDA_SUCCESS == cuDeviceGetCount(&devCount));
-    die_if(devCount <= 0, "No available GPUs detected.");
+    die_if(devCount <= 0 || mpi_localrank >= devCount, "No available GPUs detected for device rank = %d.", mpi_localrank);
 
+    devCount = 1;
     devices.resize(devCount);
 
     for (int i = 0; i < devCount; ++i) {
-      ensure(CUDA_SUCCESS == cuDevicePrimaryCtxRetain(&devices[i].hContext, i));
+      ensure(CUDA_SUCCESS == cuDevicePrimaryCtxRetain(&devices[i].hContext, mpi_localrank));
       ensure(CUDA_SUCCESS == cuCtxSetCurrent(devices[i].hContext));
       ensure(CUDA_SUCCESS == cuStreamCreate(&devices[i].hStream, CU_STREAM_NON_BLOCKING));
       ensure(CUBLAS_STATUS_SUCCESS == cublasCreate(&devices[i].hCublas));
       ensure(CUBLAS_STATUS_SUCCESS == cublasSetPointerMode_v2(devices[i].hCublas, CUBLAS_POINTER_MODE_HOST));
       ensure(CUDNN_STATUS_SUCCESS == cudnnCreate(&devices[i].hCudnn));
+      ensure(CUBLAS_STATUS_SUCCESS == cublasSetStream_v2(devices[i].hCublas, devices[i].hStream));
+      ensure(CUDNN_STATUS_SUCCESS == cudnnSetStream(devices[i].hCudnn, devices[i].hStream));
     }
 
-    activateCurrentDevice(0);
-    return devCount;
+    currentDev = 0;
+    // devices[currentDev].hCublas = devices[currentDev].hCublas;
+    // devices[currentDev].hCudnn = devices[currentDev].hCudnn;
+
+    ncclUniqueId id;
+    if (mpi_rank == 0)
+      ncclGetUniqueId(&id);
+    MPI_Bcast((void *)&id, sizeof(id), MPI_BYTE, 0, MPI_COMM_WORLD);
+
+    ensure(0 == ncclGroupStart());
+    ensure(0 == ncclCommInitRank(&comm, mpi_size, id, mpi_rank));
+    ensure(0 == ncclGroupEnd());
   }
 
   static void quit(int exitCode = 0) {
     globalStop = true;
     while (activeThread)
       usleep(50000);
+
+    ensure(0 == ncclCommDestroy(comm));
+    MPI_Finalize();
     exit(exitCode);
   }
 
   static void synchronizeCurrentDevice() {
     ensure(CUDA_SUCCESS == cuStreamSynchronize(devices[currentDev].hStream));
-  }
-  
-  static void activateCurrentDevice(int dev) {
-    ensure(dev < devices.size());
-    if (currentDev == dev)
-      return;
-    currentDev = dev;
-    ensure(CUDA_SUCCESS == cuCtxSetCurrent(devices[dev].hContext));
-    cublasHandle = devices[dev].hCublas;
-    cudnnHandle = devices[dev].hCudnn;
-    ensure(CUBLAS_STATUS_SUCCESS == cublasSetStream_v2(cublasHandle, devices[currentDev].hStream));
-    ensure(CUDNN_STATUS_SUCCESS == cudnnSetStream(cudnnHandle, devices[currentDev].hStream));
   }
 
 
@@ -276,7 +288,7 @@ public:
     Tensor ans({by, ax});
 
     float alpha = 1.0f, beta = 0.0f;
-    ensure(0 == cublasSgemm(cublasHandle,
+    ensure(0 == cublasSgemm(devices[currentDev].hCublas,
                             transposeA ? CUBLAS_OP_T : CUBLAS_OP_N, transposeB ? CUBLAS_OP_T : CUBLAS_OP_N,
                             ax, by, ay, &alpha,
                             (float*)A->d_data->get(), A->shape[1],  // X
@@ -295,11 +307,11 @@ public:
 
   Tensor self_update(const Tensor &that, float alpha = 1.0f, float beta = 0.0f) const {
     if (fabs(alpha) < 1e-7f) {
-      ensure(CUBLAS_STATUS_SUCCESS == cublasSscal(cublasHandle, count(), &beta, (float*)this->d_data->get(), 1));
+      ensure(CUBLAS_STATUS_SUCCESS == cublasSscal(devices[currentDev].hCublas, count(), &beta, (float*)this->d_data->get(), 1));
       return *this;
     }
     ensure(this->shape == that.shape);
-    ensure(CUDNN_STATUS_SUCCESS == cudnnTransformTensor(cudnnHandle,
+    ensure(CUDNN_STATUS_SUCCESS == cudnnTransformTensor(devices[currentDev].hCudnn,
         &alpha, that.dataTensor->get(), (float*)that.d_data->get(),
         &beta, this->dataTensor->get(), (float*)this->d_data->get()));
     return *this;
@@ -318,9 +330,9 @@ public:
   Tensor add(const Tensor &that, float ceof = 1.0f) const {
     ensure(this->shape == that.shape);
     Tensor ans(this->shape, 0.0f);
-    ensure(CUBLAS_STATUS_SUCCESS == cublasSaxpy(cublasHandle, count(), &ceof, (float*)this->d_data->get(), 1, (float*)ans.d_data->get(), 1));
+    ensure(CUBLAS_STATUS_SUCCESS == cublasSaxpy(devices[currentDev].hCublas, count(), &ceof, (float*)this->d_data->get(), 1, (float*)ans.d_data->get(), 1));
     // Tensor ans = this->copy();
-    ensure(CUBLAS_STATUS_SUCCESS == cublasSaxpy(cublasHandle, count(), &ceof, (float*)that.d_data->get(), 1, (float*)ans.d_data->get(), 1));
+    ensure(CUBLAS_STATUS_SUCCESS == cublasSaxpy(devices[currentDev].hCublas, count(), &ceof, (float*)that.d_data->get(), 1, (float*)ans.d_data->get(), 1));
     return ans;
   }
 
@@ -334,13 +346,13 @@ public:
     cudnnCreateOpTensorDescriptor(&op_desc);
 
     cudnnSetOpTensorDescriptor(op_desc, CUDNN_OP_TENSOR_MAX, CUDNN_DATA_FLOAT, CUDNN_NOT_PROPAGATE_NAN);
-    ensure(CUDNN_STATUS_SUCCESS == cudnnOpTensor(cudnnHandle, op_desc,
+    ensure(CUDNN_STATUS_SUCCESS == cudnnOpTensor(devices[currentDev].hCudnn, op_desc,
       &alpha, this->dataTensor->get(), (float*)left.d_data->get(),
       &alpha, this->dataTensor->get(), (float*)this->d_data->get(),
       &beta, this->dataTensor->get(), (float*)interm.d_data->get()));
 
     cudnnSetOpTensorDescriptor(op_desc, CUDNN_OP_TENSOR_MIN, CUDNN_DATA_FLOAT, CUDNN_NOT_PROPAGATE_NAN);
-    ensure(CUDNN_STATUS_SUCCESS == cudnnOpTensor(cudnnHandle, op_desc,
+    ensure(CUDNN_STATUS_SUCCESS == cudnnOpTensor(devices[currentDev].hCudnn, op_desc,
       &alpha, this->dataTensor->get(), (float*)right.d_data->get(),
       &alpha, this->dataTensor->get(), (float*)interm.d_data->get(),
       &beta, this->dataTensor->get(), (float*)left.d_data->get()));

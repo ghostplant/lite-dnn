@@ -141,7 +141,7 @@ public:
     float alpha = 1.0f, beta = 0.0f;
 
     Tensor y(xs[0].shape);
-    ensure(CUDNN_STATUS_SUCCESS == cudnnSoftmaxForward(cudnnHandle, CUDNN_SOFTMAX_ACCURATE, CUDNN_SOFTMAX_MODE_INSTANCE,
+    ensure(CUDNN_STATUS_SUCCESS == cudnnSoftmaxForward(devices[currentDev].hCudnn, CUDNN_SOFTMAX_ACCURATE, CUDNN_SOFTMAX_MODE_INSTANCE,
         &alpha, xs[0].dataTensor->get(), (float*)xs[0].d_data->get(), &beta, y.dataTensor->get(), (float*)y.d_data->get()));
     cacheTensors = {y};
     return y;
@@ -159,8 +159,8 @@ public:
     size_t len = _dy.count();
 
     Tensor dx(_dy.shape, 0.0f);
-    cublasSaxpy(cublasHandle, len, &posi, (float*)y.d_data->get(), 1, (float*)dx.d_data->get(), 1);
-    cublasSaxpy(cublasHandle, len, &nega, (float*)_dy.d_data->get(), 1, (float*)dx.d_data->get(), 1);
+    cublasSaxpy(devices[currentDev].hCublas, len, &posi, (float*)y.d_data->get(), 1, (float*)dx.d_data->get(), 1);
+    cublasSaxpy(devices[currentDev].hCublas, len, &nega, (float*)_dy.d_data->get(), 1, (float*)dx.d_data->get(), 1);
     return { move(dx) };
   }
 };
@@ -186,7 +186,7 @@ public:
   Tensor forward(const vector<Tensor> &xs, const unordered_map<string, Tensor> &feed_dict) {
     Tensor y(xs[0].shape);
     float alpha = 1.0f, beta = 0.0f;
-    ensure(CUDNN_STATUS_SUCCESS == cudnnActivationForward(cudnnHandle, activationDesc, \
+    ensure(CUDNN_STATUS_SUCCESS == cudnnActivationForward(devices[currentDev].hCudnn, activationDesc, \
         &alpha, xs[0].dataTensor->get(), (float*)xs[0].d_data->get(), &beta, y.dataTensor->get(), (float*)y.d_data->get()));
 
     cacheTensors = {xs[0], y};
@@ -198,7 +198,7 @@ public:
 
     Tensor dx(x.shape);
     float alpha = 1.0f, beta = 0.0f;
-    ensure(CUDNN_STATUS_SUCCESS == cudnnActivationBackward(cudnnHandle, activationDesc,
+    ensure(CUDNN_STATUS_SUCCESS == cudnnActivationBackward(devices[currentDev].hCudnn, activationDesc,
         &alpha, y.dataTensor->get(), (float*)y.d_data->get(), dy.dataTensor->get(), (float*)dy.d_data->get(),
         x.dataTensor->get(), (float*)x.d_data->get(), &beta, dx.dataTensor->get(), (float*)dx.d_data->get()));
     return { move(dx) };
@@ -232,7 +232,7 @@ public:
 
     Tensor y(xs[0].shape);
     float alpha = 1.0f, beta = 0.0f;
-    ensure(CUDNN_STATUS_SUCCESS == cudnnLRNCrossChannelForward(cudnnHandle, lrnDesc, CUDNN_LRN_CROSS_CHANNEL_DIM1,
+    ensure(CUDNN_STATUS_SUCCESS == cudnnLRNCrossChannelForward(devices[currentDev].hCudnn, lrnDesc, CUDNN_LRN_CROSS_CHANNEL_DIM1,
         &alpha, xs[0].dataTensor->get(), (float*)xs[0].d_data->get(), &beta, y.dataTensor->get(), (float*)y.d_data->get()));
 
     cacheTensors = {xs[0], y};
@@ -244,7 +244,7 @@ public:
 
     Tensor dx(x.shape);
     float alpha = 1.0f, beta = 0.0f;
-    ensure(CUDNN_STATUS_SUCCESS == cudnnLRNCrossChannelBackward(cudnnHandle, lrnDesc, CUDNN_LRN_CROSS_CHANNEL_DIM1,
+    ensure(CUDNN_STATUS_SUCCESS == cudnnLRNCrossChannelBackward(devices[currentDev].hCudnn, lrnDesc, CUDNN_LRN_CROSS_CHANNEL_DIM1,
         &alpha, y.dataTensor->get(), (float*)y.d_data->get(), dy.dataTensor->get(), (float*)dy.d_data->get(),
         x.dataTensor->get(), (float*)x.d_data->get(), &beta, dx.dataTensor->get(), (float*)dx.d_data->get()));
     return { move(dx) };
@@ -281,7 +281,7 @@ public:
     shape[0] = xs[0].shape[0];
     Tensor y(shape);
     float alpha = 1.0f, beta = 0.0f;
-    ensure(CUDNN_STATUS_SUCCESS == cudnnPoolingForward(cudnnHandle, poolDesc,
+    ensure(CUDNN_STATUS_SUCCESS == cudnnPoolingForward(devices[currentDev].hCudnn, poolDesc,
         &alpha, xs[0].dataTensor->get(), (float*)xs[0].d_data->get(), &beta, y.dataTensor->get(), (float*)y.d_data->get()));
 
     cacheTensors = {xs[0], y};
@@ -293,7 +293,7 @@ public:
 
     Tensor dx(x.shape);
     float alpha = 1.0f, beta = 0.0f;
-    ensure(CUDNN_STATUS_SUCCESS == cudnnPoolingBackward(cudnnHandle, poolDesc,
+    ensure(CUDNN_STATUS_SUCCESS == cudnnPoolingBackward(devices[currentDev].hCudnn, poolDesc,
         &alpha, y.dataTensor->get(), (float*)y.d_data->get(), dy.dataTensor->get(), (float*)dy.d_data->get(),
         x.dataTensor->get(), (float*)x.d_data->get(), &beta, dx.dataTensor->get(), (float*)dx.d_data->get()));
     return { move(dx) };
@@ -311,10 +311,10 @@ class Dropout: public Layer {
 public:
   Dropout(float drop_prob = 0.1f, uint64_t seed = 10): reversed_size(~0LU), seed(seed), drop_prob(drop_prob) {
     ensure(CUDNN_STATUS_SUCCESS == cudnnCreateDropoutDescriptor(&dropDesc));
-    ensure(CUDNN_STATUS_SUCCESS == cudnnDropoutGetStatesSize(cudnnHandle, &states_size));
+    ensure(CUDNN_STATUS_SUCCESS == cudnnDropoutGetStatesSize(devices[currentDev].hCudnn, &states_size));
 
     states = make_shared<Tensor::DeviceMemory>(states_size);
-    ensure(CUDNN_STATUS_SUCCESS == cudnnSetDropoutDescriptor(dropDesc, cudnnHandle, drop_prob, states->get(), states_size, seed));
+    ensure(CUDNN_STATUS_SUCCESS == cudnnSetDropoutDescriptor(dropDesc, devices[currentDev].hCudnn, drop_prob, states->get(), states_size, seed));
   }
 
   ~Dropout() {
@@ -335,7 +335,7 @@ public:
     }
 
     Tensor y(xs[0].shape);
-    ensure(CUDNN_STATUS_SUCCESS == cudnnDropoutForward(cudnnHandle, dropDesc, xs[0].dataTensor->get(), (float*)xs[0].d_data->get(),
+    ensure(CUDNN_STATUS_SUCCESS == cudnnDropoutForward(devices[currentDev].hCudnn, dropDesc, xs[0].dataTensor->get(), (float*)xs[0].d_data->get(),
       y.dataTensor->get(), (float*)y.d_data->get(), reversed->get(), reversed_size));
     cacheTensors = {xs[0], y};
     return move(y);
@@ -343,14 +343,14 @@ public:
 
   vector<Tensor> backward(const Tensor &dy, const unordered_map<string, Tensor> &feed_dict) {
     const Tensor &x = cacheTensors[0], &y = cacheTensors[1];
-    ensure(CUDNN_STATUS_SUCCESS == cudnnRestoreDropoutDescriptor(dropDesc, cudnnHandle, drop_prob, states->get(), states_size, seed));
+    ensure(CUDNN_STATUS_SUCCESS == cudnnRestoreDropoutDescriptor(dropDesc, devices[currentDev].hCudnn, drop_prob, states->get(), states_size, seed));
 
     size_t _reversed_size;
     ensure(CUDNN_STATUS_SUCCESS == cudnnDropoutGetReserveSpaceSize(y.dataTensor->get(), &_reversed_size));
     ensure(_reversed_size <= reversed_size);
 
     Tensor dx(x.shape);
-    ensure(CUDNN_STATUS_SUCCESS == cudnnDropoutBackward(cudnnHandle, dropDesc, dy.dataTensor->get(), (float*)dy.d_data->get(),
+    ensure(CUDNN_STATUS_SUCCESS == cudnnDropoutBackward(devices[currentDev].hCudnn, dropDesc, dy.dataTensor->get(), (float*)dy.d_data->get(),
       dx.dataTensor->get(), (float*)dx.d_data->get(), reversed->get(), reversed_size));
     return { move(dx) };
   }
@@ -420,7 +420,7 @@ public:
     // return move(wx_b);
 
     float alpha = 1.0f;
-    cublasSgemm(cublasHandle,
+    cublasSgemm(devices[currentDev].hCublas,
                 CUBLAS_OP_N, CUBLAS_OP_N,
                 bias.shape[1], y.shape[0], 1,
                 &alpha,
@@ -510,21 +510,21 @@ public:
     Tensor y(output_shape);
 
     cudnnConvolutionFwdAlgo_t convalgo;
-    ensure(CUDNN_STATUS_SUCCESS == cudnnGetConvolutionForwardAlgorithm(cudnnHandle, xs[0].dataTensor->get(), filterDesc, convDesc,
+    ensure(CUDNN_STATUS_SUCCESS == cudnnGetConvolutionForwardAlgorithm(devices[currentDev].hCudnn, xs[0].dataTensor->get(), filterDesc, convDesc,
         y.dataTensor->get(), CUDNN_CONVOLUTION_FWD_PREFER_FASTEST, 0, &convalgo));
 
     size_t sizeInBytes;
-    ensure(CUDNN_STATUS_SUCCESS == cudnnGetConvolutionForwardWorkspaceSize(cudnnHandle, xs[0].dataTensor->get(), filterDesc, convDesc,
+    ensure(CUDNN_STATUS_SUCCESS == cudnnGetConvolutionForwardWorkspaceSize(devices[currentDev].hCudnn, xs[0].dataTensor->get(), filterDesc, convDesc,
         y.dataTensor->get(), convalgo, &sizeInBytes));
 
     Tensor::DeviceMemory workspace(sizeInBytes);
 
-    ensure(CUDNN_STATUS_SUCCESS == cudnnConvolutionForward(cudnnHandle, &alpha, xs[0].dataTensor->get(), (float*)xs[0].d_data->get(),
+    ensure(CUDNN_STATUS_SUCCESS == cudnnConvolutionForward(devices[currentDev].hCudnn, &alpha, xs[0].dataTensor->get(), (float*)xs[0].d_data->get(),
         filterDesc, (float*)w_krnl.d_data->get(), convDesc, convalgo, workspace.get(), sizeInBytes,
         &beta, y.dataTensor->get(), (float*)y.d_data->get()));
 
     if (use_bias)
-      ensure(CUDNN_STATUS_SUCCESS == cudnnAddTensor(cudnnHandle,
+      ensure(CUDNN_STATUS_SUCCESS == cudnnAddTensor(devices[currentDev].hCudnn,
         &alpha, w_bias.dataTensor->get(), (float*)w_bias.d_data->get(), &alpha, y.dataTensor->get(), (float*)y.d_data->get()));
     cacheTensors = {xs[0], y};
     return move(y);
@@ -538,18 +538,18 @@ public:
 
     cudnnConvolutionBwdDataAlgo_t dalgo;
     ensure(CUDNN_STATUS_SUCCESS == cudnnGetConvolutionBackwardDataAlgorithm(
-                cudnnHandle, filterDesc, y.dataTensor->get(), convDesc, x.dataTensor->get(),
+                devices[currentDev].hCudnn, filterDesc, y.dataTensor->get(), convDesc, x.dataTensor->get(),
                 CUDNN_CONVOLUTION_BWD_DATA_PREFER_FASTEST, 0, &dalgo));
 
     size_t sizeInBytes;
     ensure(CUDNN_STATUS_SUCCESS == cudnnGetConvolutionBackwardDataWorkspaceSize(
-                cudnnHandle, filterDesc, y.dataTensor->get(), convDesc, x.dataTensor->get(), 
+                devices[currentDev].hCudnn, filterDesc, y.dataTensor->get(), convDesc, x.dataTensor->get(), 
                 dalgo, &sizeInBytes));
 
     Tensor::DeviceMemory workspace(sizeInBytes);
 
     Tensor dx({n, c, h, w});
-    ensure(CUDNN_STATUS_SUCCESS == cudnnConvolutionBackwardData(cudnnHandle, &alpha,
+    ensure(CUDNN_STATUS_SUCCESS == cudnnConvolutionBackwardData(devices[currentDev].hCudnn, &alpha,
                 filterDesc, (float*)w_krnl.d_data->get(),
                 dy.dataTensor->get(), (float*)dy.d_data->get(),
                 convDesc, dalgo, workspace.get(), sizeInBytes, &beta,
@@ -564,18 +564,18 @@ public:
 
     cudnnConvolutionBwdFilterAlgo_t falgo;
     ensure(CUDNN_STATUS_SUCCESS == cudnnGetConvolutionBackwardFilterAlgorithm(
-                cudnnHandle, x.dataTensor->get(), y.dataTensor->get(), convDesc, filterDesc,
+                devices[currentDev].hCudnn, x.dataTensor->get(), y.dataTensor->get(), convDesc, filterDesc,
                 CUDNN_CONVOLUTION_BWD_FILTER_PREFER_FASTEST, 0, &falgo));
 
     size_t sizeInBytes;
     ensure(CUDNN_STATUS_SUCCESS == cudnnGetConvolutionBackwardFilterWorkspaceSize(
-                cudnnHandle, x.dataTensor->get(), y.dataTensor->get(), convDesc, filterDesc, 
+                devices[currentDev].hCudnn, x.dataTensor->get(), y.dataTensor->get(), convDesc, filterDesc, 
                 falgo, &sizeInBytes));
 
     Tensor::DeviceMemory workspace(sizeInBytes);
 
     float alpha = 1.0f, beta = 0.0f;
-    ensure(CUDNN_STATUS_SUCCESS == cudnnConvolutionBackwardFilter(cudnnHandle, &alpha,
+    ensure(CUDNN_STATUS_SUCCESS == cudnnConvolutionBackwardFilter(devices[currentDev].hCudnn, &alpha,
                 x.dataTensor->get(), (float*)x.d_data->get(),
                 dy.dataTensor->get(), (float*)dy.d_data->get(),
                 convDesc, falgo, workspace.get(), sizeInBytes, &beta,
@@ -584,7 +584,7 @@ public:
     if (use_bias) {
       grads.push_back(Tensor(w_bias.shape));
 
-      ensure(CUDNN_STATUS_SUCCESS == cudnnConvolutionBackwardBias(cudnnHandle, &alpha,
+      ensure(CUDNN_STATUS_SUCCESS == cudnnConvolutionBackwardBias(devices[currentDev].hCudnn, &alpha,
              dy.dataTensor->get(), (float*)dy.d_data->get(), &beta,
              grads[1].dataTensor->get(), (float*)grads[1].d_data->get()));
     }
@@ -638,7 +638,7 @@ public:
     die_if(false, "batchnorm not supported yet.");
     Tensor y(xs[0].shape);
     float alpha = 1.0f, beta = 0.0f;
-    ensure(CUDNN_STATUS_SUCCESS == cudnnBatchNormalizationForwardTraining(cudnnHandle, bnMode,
+    ensure(CUDNN_STATUS_SUCCESS == cudnnBatchNormalizationForwardTraining(devices[currentDev].hCudnn, bnMode,
       &alpha, &beta, xs[0].dataTensor->get(), (float*)xs[0].d_data->get(), y.dataTensor->get(), (float*)y.d_data->get(),
       bnScal.dataTensor->get(), (float*)bnScal.d_data->get(), (float*)bnBias.d_data->get(),
       1.0 / steps, // extra for training
@@ -655,7 +655,7 @@ public:
     Tensor dx(dy.shape);
     float alpha = 1.0f, beta = 0.0f;
 
-    ensure(CUDNN_STATUS_SUCCESS == cudnnBatchNormalizationBackward(cudnnHandle, bnMode,
+    ensure(CUDNN_STATUS_SUCCESS == cudnnBatchNormalizationBackward(devices[currentDev].hCudnn, bnMode,
       &alpha, &beta, &alpha, &beta, x.dataTensor->get(), (float*)x.d_data->get(), y.dataTensor->get(), (float*)y.d_data->get(),
       dx.dataTensor->get(), (float*)dx.d_data->get(), bnScal.dataTensor->get(),
       (float*)bnScal.d_data->get(), (float*)g_scal.d_data->get(), (float*)g_bias.d_data->get(), CUDNN_BN_MIN_EPSILON,
