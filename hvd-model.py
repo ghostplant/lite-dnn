@@ -3,7 +3,7 @@
 [Example]
 
 # HOROVOD_GPU_ALLREDUCE=NCCL pip3 install --no-cache-dir --upgrade horovod
-# g++ generator.cpp -fPIC -O3 -std=c++14 -shared -lpthread -lcuda -lcudart -lopencv_core -lopencv_highgui -lopencv_imgproc -I/usr/local/cuda/include -L/usr/local/cuda/lib64 && mpiexec -H 192.168.2.130,192.168.2.130,192.168.2.130,192.168.2.130,192.168.2.131,192.168.2.131,192.168.2.131,192.168.2.131,192.168.2.132,192.168.2.132,192.168.2.132,192.168.2.132  --mca oob_tcp_if_include enp216s0 --mca btl_tcp_if_include enp216s0 -x NCCL_SOCKET_IFNAME=enp216s0     --allow-run-as-root --map-by slot --bind-to none -x LD_PRELOAD=`pwd`/a.out -x NCCL_DEBUG=INFO -x GPUAAS_DATASET=/var/lib/docker/imagenet/train ./hvd-model.py
+# g++ hvd-generator.cpp -fPIC -O3 -std=c++14 -shared -lpthread -lcuda -lcudart -lopencv_core -lopencv_highgui -lopencv_imgproc -I/usr/local/cuda/include -L/usr/local/cuda/lib64 && mpiexec -H 192.168.2.130,192.168.2.130,192.168.2.130,192.168.2.130,192.168.2.131,192.168.2.131,192.168.2.131,192.168.2.131,192.168.2.132,192.168.2.132,192.168.2.132,192.168.2.132  --mca oob_tcp_if_include enp216s0 --mca btl_tcp_if_include enp216s0 -x NCCL_SOCKET_IFNAME=enp216s0     --allow-run-as-root --map-by slot --bind-to none -x LD_PRELOAD=`pwd`/a.out -x NCCL_DEBUG=INFO -x GPUAAS_DATASET=/var/lib/docker/imagenet/train ./hvd-model.py
 '''
 
 import time, os, sys

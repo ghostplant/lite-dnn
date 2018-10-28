@@ -1,5 +1,5 @@
 /*
-  mnist_mlp based on CUBLAS/CUDNN
+  DNN Trainging based on CUBLAS/CUDNN/NCCL/OpenMPI
 
   Maintainer: Wei CUI <ghostplant@qq.com>
 
@@ -66,15 +66,15 @@ int main(int argc, char **argv) {
   auto gen = make_shared<ImageDataGenerator>(dataset.first, 224, 224, 4, batch_size, true);
   auto val_gen = make_shared<ImageDataGenerator>(dataset.second, 224, 224, 1, batch_size, false);
 
-  auto model_replias = lite_dnn::apps::imagenet_resnet50v1::create_model(
+  auto model = lite_dnn::apps::imagenet_resnet50v1::create_model(
     "image_place_0", "label_place_0", {gen->channel, gen->height, gen->width}, gen->n_class);
-  auto optimizor = make_shared<MomentumOptimizor>(model_replias, 0.9f, 0.001f, 0.001f);
+  auto optimizor = make_shared<MomentumOptimizor>(model, 0.9f, 0.001f, 0.001f);
 
   if (mpi_rank == 0)
-    model_replias->summary();
+    model->summary();
 
-  model_replias->load_weights_from_file("weights.lw");
-  vector<Tensor> weights = model_replias->collect_all_weights();
+  model->load_weights_from_file("weights.lw");
+  vector<Tensor> weights = model->collect_all_weights();
   Tensor::synchronizeCurrentDevice();
 
   long lastClock = get_microseconds(), last_k = 0;
@@ -85,9 +85,9 @@ int main(int argc, char **argv) {
     auto batch_data = gen->next_batch();
 
     auto feed_dict = unordered_map<string, Tensor>({{"image_place_0", batch_data[0]}, {"label_place_0", batch_data[1]}});
-    auto predicts = model_replias->predict(feed_dict);
+    auto predicts = model->predict(feed_dict);
 
-    auto grad = model_replias->collect_all_gradients(feed_dict);
+    auto grad = model->collect_all_gradients(feed_dict);
     ensure(0 == ncclGroupStart());
     for (int j = 0; j < grad.size(); ++j)
       ensure(0 == ncclAllReduce((const void*)grad[j].d_data->get(), (void*)grad[j].d_data->get(), grad[j].count(), ncclFloat, ncclSum, comm, devices[currentDev].hStream));
@@ -103,7 +103,7 @@ int main(int argc, char **argv) {
 
       val_gen->recycleBuffer();
       auto val_batch_data = val_gen->next_batch();
-      auto val_predicts = model_replias->predict({{"image_place_0", val_batch_data[0]}});
+      auto val_predicts = model->predict({{"image_place_0", val_batch_data[0]}});
       auto val_lacc = val_predicts.get_loss_and_accuracy_with(val_batch_data[1]);
       double during = (get_microseconds() - lastClock) * 1e-6f;
       printf("==> [GPU-%d] step = %d (batch = %d; %.2lf images/sec): loss = %.4f, acc = %.2f%%, val_loss = %.4f, val_acc = %.2f%%, during = %.2fs\n",
@@ -112,7 +112,7 @@ int main(int argc, char **argv) {
       if (k % save_frequency == 0 || k == steps) {
         if (mpi_rank == 0) {
           printf("Saving model weights ..\n");
-          model_replias->save_weights_to_file("weights.lw");
+          model->save_weights_to_file("weights.lw");
           Tensor::synchronizeCurrentDevice();
         }
         MPI_Barrier(MPI_COMM_WORLD);
