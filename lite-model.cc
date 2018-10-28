@@ -63,8 +63,8 @@ int main(int argc, char **argv) {
 
   printf("Creating generator for GPU-%d ..\n", mpi_rank);
   auto dataset = load_images("cifar10");
-  auto gen = make_shared<ImageDataGenerator>(dataset.first, 224, 224, 4, batch_size);
-  auto val_gen = make_shared<ImageDataGenerator>(dataset.second, 224, 224, 1, batch_size);
+  auto gen = make_shared<ImageDataGenerator>(dataset.first, 224, 224, 4, batch_size, true);
+  auto val_gen = make_shared<ImageDataGenerator>(dataset.second, 224, 224, 1, batch_size, false);
 
   auto model_replias = lite_dnn::apps::imagenet_resnet50v1::create_model(
     "image_place_0", "label_place_0", {gen->channel, gen->height, gen->width}, gen->n_class);
@@ -82,7 +82,7 @@ int main(int argc, char **argv) {
   for (int k = 1; k <= steps; ++k) {
 
     gen->recycleBuffer();
-    auto batch_data = gen->next_batch(batch_size);
+    auto batch_data = gen->next_batch();
 
     auto feed_dict = unordered_map<string, Tensor>({{"image_place_0", batch_data[0]}, {"label_place_0", batch_data[1]}});
     auto predicts = model_replias->predict(feed_dict);
@@ -102,7 +102,7 @@ int main(int argc, char **argv) {
       auto lacc = predicts.get_loss_and_accuracy_with(batch_data[1]);
 
       val_gen->recycleBuffer();
-      auto val_batch_data = val_gen->next_batch(batch_size);
+      auto val_batch_data = val_gen->next_batch();
       auto val_predicts = model_replias->predict({{"image_place_0", val_batch_data[0]}});
       auto val_lacc = val_predicts.get_loss_and_accuracy_with(val_batch_data[1]);
       double during = (get_microseconds() - lastClock) * 1e-6f;
@@ -120,7 +120,7 @@ int main(int argc, char **argv) {
       lastClock = get_microseconds(), last_k = k;
     }
   }
-
+  printf("==> [GPU-%d] Training finished.\n", mpi_rank);
   Tensor::quit();
   return 0;
 }

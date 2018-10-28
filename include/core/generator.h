@@ -88,14 +88,14 @@ public:
   };
 
   vector<Worker> workers;
-  bool threadStop;
+  bool threadStop, augment;
   int cache_size, batch_size, next_iter;
 
   vector<pair<CUevent, float*>> hostMemBuffer;
   MemoryManager *hostMem;
 
-  ImageDataGenerator(string path, int height, int width, int thread_para, int batch_size): height(height), width(width), channel(3),
-      workers(thread_para), batch_size(batch_size), next_iter(0) {
+  ImageDataGenerator(string path, int height, int width, int thread_para, int batch_size, bool augment = false): height(height), width(width), channel(3),
+      workers(thread_para), batch_size(batch_size), next_iter(0), augment(augment) {
     if (path.size() > 0 && path[path.size() - 1] != '/')
       path += '/';
 
@@ -188,9 +188,9 @@ public:
       while (1) {
         if (threadStop || globalStop) {
           // On Exit
-          while (recycleBuffer())
+          /* while (recycleBuffer())
             ;
-          delete hostMem;
+          delete hostMem;*/
           __sync_add_and_fetch(&activeThread, -1);
           return;
         }
@@ -207,9 +207,8 @@ public:
     }
   }
 
-  vector<Tensor> next_batch(int batch_size) {
-    size_t split = batch_size * channel * height * width, tail = split + batch_size * keyset.size();
-    ensure(this->batch_size == batch_size);
+  vector<Tensor> next_batch() {
+    size_t split = batch_size * channel * height * width, tail = split + batch_size * n_class;
 
     int i = next_iter;
     next_iter = (next_iter + 1) % workers.size();
@@ -274,11 +273,13 @@ public:
 
     cv::Size dst_size(height, width);
     cv::Mat dst;
-    double angle = (2.0 * u_rand(&seed) / double(RAND_MAX) - 1.0) * 10.0;
-    double scale = 1.0 + 0.2 * u_rand(&seed) / double(RAND_MAX);
-    cv::Mat matRotation = cv::getRotationMatrix2D(cv::Point(image.cols / 2, image.rows / 2), angle, scale);
-    cv::warpAffine(image, dst, matRotation, image.size());
-    swap(dst, image);
+    if (augment) {
+      double angle = (2.0 * u_rand(&seed) / double(RAND_MAX) - 1.0) * 10.0;
+      double scale = 1.0 + 0.2 * u_rand(&seed) / double(RAND_MAX);
+      cv::Mat matRotation = cv::getRotationMatrix2D(cv::Point(image.cols / 2, image.rows / 2), angle, scale);
+      cv::warpAffine(image, dst, matRotation, image.size());
+      swap(dst, image);
+    }
     cv::resize(image, dst, dst_size);
     l[one_hot] = 1.0f;
 
