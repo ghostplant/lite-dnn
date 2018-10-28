@@ -189,18 +189,19 @@ public:
     ensure(CUDNN_STATUS_SUCCESS == cudnnActivationForward(devices[currentDev].hCudnn, activationDesc, \
         &alpha, xs[0].dataTensor->get(), (float*)xs[0].d_data->get(), &beta, y.dataTensor->get(), (float*)y.d_data->get()));
 
-    cacheTensors = {xs[0], y};
+    cacheTensors = {y};
     return move(y);
   }
 
   vector<Tensor> backward(const Tensor &dy, const unordered_map<string, Tensor> &feed_dict) {
-    const Tensor &x = cacheTensors[0], &y = cacheTensors[1];
+    const Tensor &y = cacheTensors[0];
 
-    Tensor dx(x.shape);
+    // ignore x value, reuse y value as dx
+    Tensor dx = y; // Tensor dx(y.shape);
     float alpha = 1.0f, beta = 0.0f;
     ensure(CUDNN_STATUS_SUCCESS == cudnnActivationBackward(devices[currentDev].hCudnn, activationDesc,
         &alpha, y.dataTensor->get(), (float*)y.d_data->get(), dy.dataTensor->get(), (float*)dy.d_data->get(),
-        x.dataTensor->get(), (float*)x.d_data->get(), &beta, dx.dataTensor->get(), (float*)dx.d_data->get()));
+        y.dataTensor->get(), (float*)y.d_data->get(), &beta, dx.dataTensor->get(), (float*)dx.d_data->get()));
     return { move(dx) };
   }
 };

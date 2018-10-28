@@ -66,9 +66,9 @@ int main(int argc, char **argv) {
   auto gen = make_shared<ImageDataGenerator>(dataset.first, 224, 224, 4, batch_size);
   auto val_gen = make_shared<ImageDataGenerator>(dataset.second, 224, 224, 1, batch_size);
 
-  auto model_replias = lite_dnn::apps::imagenet_alexnet::create_model(
+  auto model_replias = lite_dnn::apps::imagenet_resnet50v1::create_model(
     "image_place_0", "label_place_0", {gen->channel, gen->height, gen->width}, gen->n_class);
-  auto optimizor = make_shared<MomentumOptimizor>(model_replias, 0.9f, 0.001f / mpi_size, 0.001f);
+  auto optimizor = make_shared<MomentumOptimizor>(model_replias, 0.9f, 0.001f, 0.001f);
 
   if (mpi_rank == 0)
     model_replias->summary();
@@ -88,12 +88,14 @@ int main(int argc, char **argv) {
     auto predicts = model_replias->predict(feed_dict);
 
     auto grad = model_replias->collect_all_gradients(feed_dict);
+    ensure(0 == ncclGroupStart());
     for (int j = 0; j < grad.size(); ++j)
       ensure(0 == ncclAllReduce((const void*)grad[j].d_data->get(), (void*)grad[j].d_data->get(), grad[j].count(), ncclFloat, ncclSum, comm, devices[currentDev].hStream));
+    ensure(0 == ncclGroupEnd());
 
     optimizor->apply_updates(grad);
 
-    long total_batch = batch_size * mpi_size, metric_frequency = 50, save_frequency = 1000;
+    long metric_frequency = 50, save_frequency = 1000;
     ensure(save_frequency % metric_frequency == 0);
 
     if (k % metric_frequency == 0 || k == 1) {
@@ -104,8 +106,8 @@ int main(int argc, char **argv) {
       auto val_predicts = model_replias->predict({{"image_place_0", val_batch_data[0]}});
       auto val_lacc = val_predicts.get_loss_and_accuracy_with(val_batch_data[1]);
       double during = (get_microseconds() - lastClock) * 1e-6f;
-      printf("==> [GPU-%d] step = %d (batch = %ld; %.2lf images/sec): loss = %.4f, acc = %.2f%%, val_loss = %.4f, val_acc = %.2f%%, during = %.2fs\n",
-        mpi_rank, k, total_batch, (k - last_k) * total_batch / during, lacc.first, lacc.second, val_lacc.first, val_lacc.second, during);
+      printf("==> [GPU-%d] step = %d (batch = %d; %.2lf images/sec): loss = %.4f, acc = %.2f%%, val_loss = %.4f, val_acc = %.2f%%, during = %.2fs\n",
+        mpi_rank, k, batch_size, (k - last_k) * batch_size / during, lacc.first, lacc.second, val_lacc.first, val_lacc.second, during);
 
       if (k % save_frequency == 0 || k == steps) {
         if (mpi_rank == 0) {

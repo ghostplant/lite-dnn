@@ -152,6 +152,7 @@ public:
         }
       }
       layer->cacheTensors = {};
+      dys.erase(layer);
     }
     return move(grads);
   }
