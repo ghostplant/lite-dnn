@@ -482,6 +482,7 @@ public:
         w_bias = Tensor({1, filters, 1, 1}, 0.0f);
       }
       cudnnCreateConvolutionDescriptor(&convDesc);
+      cudnnSetConvolutionMathType(convDesc, CUDNN_TENSOR_OP_MATH);
       cudnnSetConvolution2dDescriptor(convDesc, padding, padding, stride, stride, 1, 1, CUDNN_CROSS_CORRELATION, CUDNN_DATA_FLOAT);
       // ensure(CUDNN_STATUS_SUCCESS == cudnnSetConvolutionMathType(convDesc, CUDNN_TENSOR_OP_MATH));
 
