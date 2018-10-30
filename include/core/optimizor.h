@@ -30,7 +30,8 @@ public:
     for (int i = 0; i < symbolic_weights.size(); ++i) {
       if (!symbolic_weights[i].trainable)
         continue;
-      symbolic_velocity[i].self_update(symbolic_gradients[i], speed, momentum);
+      symbolic_velocity[i].self_update(symbolic_gradients[i], speed / mpi_size, momentum / mpi_size);
+      symbolic_velocity[i].allreduce();
       symbolic_weights[i].self_add(symbolic_velocity[i], -1.0f);
     }
   }
@@ -57,7 +58,8 @@ public:
     for (int i = 0; i < symbolic_weights.size(); ++i) {
       if (!symbolic_weights[i].trainable)
         continue;
-      symbolic_weights[i].self_add(symbolic_gradients[i], -speed);
+      symbolic_gradients[i].allreduce();
+      symbolic_weights[i].self_add(symbolic_gradients[i], -speed / mpi_size);
     }
   }
 };

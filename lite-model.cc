@@ -68,8 +68,8 @@ int main(int argc, char **argv) {
 
   auto model = lite_dnn::apps::imagenet_alexnet::create_model(
     "image_place_0", "label_place_0", {gen->channel, gen->height, gen->width}, gen->n_class);
-  // auto optimizor = make_shared<MomentumOptimizor>(model, 0.9f, 0.001f, 0.001f);
-  auto optimizor = make_shared<SGDOptimizor>(model, 0.001f, 0.001f);
+  auto optimizor = make_shared<MomentumOptimizor>(model, 0.9f, 0.001f, 0.001f);
+  // auto optimizor = make_shared<SGDOptimizor>(model, 0.001f, 0.001f);
 
   if (mpi_rank == 0)
     model->summary();
@@ -89,8 +89,6 @@ int main(int argc, char **argv) {
     auto predicts = model->predict(feed_dict);
 
     auto grad = model->collect_all_gradients(feed_dict);
-    for (int j = 0; j < grad.size(); ++j)
-      grad[j].allreduce();
 
     optimizor->apply_updates(grad);
 
