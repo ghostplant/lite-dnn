@@ -33,13 +33,13 @@ public:
 
   float* allocate(unsigned int floatCnt) {
     ensure(floatCnt > 0);
-    --floatCnt;
+    /* --floatCnt;
     floatCnt |= floatCnt >> 1;
     floatCnt |= floatCnt >> 2;
     floatCnt |= floatCnt >> 4;
     floatCnt |= floatCnt >> 8;
     floatCnt |= floatCnt >> 16;
-    ++floatCnt;
+    ++floatCnt; */
 
     pthread_mutex_lock(&m_lock);
     float *memptr;

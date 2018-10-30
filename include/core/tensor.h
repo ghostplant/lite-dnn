@@ -297,6 +297,10 @@ public:
     return ans;
   }
 
+  void allreduce() const {
+    ensure(0 == ncclAllReduce((const void*)this->d_data->get(), (void*)this->d_data->get(), this->count(), ncclFloat, ncclSum, comm, devices[currentDev].hStream));
+  }
+
   double energy() const {
     double ans = 0.0;
     auto d = this->get_data();
