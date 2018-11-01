@@ -94,10 +94,11 @@ public:
   vector<pair<CUevent, float*>> hostMemBuffer;
   MemoryManager *hostMem;
 
-  ImageDataGenerator(string path, int height, int width, int thread_para, int batch_size, bool augment = false): height(height), width(width), channel(3),
-      workers(thread_para), batch_size(batch_size), next_iter(0), augment(augment) {
-    if (path.size() > 0 && path[path.size() - 1] != '/')
-      path += '/';
+  ImageDataGenerator(int height, int width, int batch_size, string path = "", int thread_para = 4, bool augment = false):
+      height(height), width(width), channel(3), n_class(1001), batch_size(batch_size), next_iter(0), augment(augment), cache_size(4) {
+
+    if (path == "")
+      return;
 
     hostMem = new MemoryManager([](size_t bytes) -> void* {
       void *cudaHostPtr = nullptr;
@@ -108,9 +109,8 @@ public:
     });
     ensure(hostMem != nullptr);
 
-    threadStop = false;
-    cache_size = 4;
-
+    if (path[path.size() - 1] != '/')
+      path += '/';
     dirent *ep, *ch_ep;
     DIR *root = opendir(path.c_str());
     die_if(root == nullptr, "Cannot open directory of path: %s.", path.c_str());
@@ -137,13 +137,16 @@ public:
       sort(keyset.begin(), keyset.end());
       samples += it.second.size();
     }
-    n_class = keyset.size();
+    if (keyset.size() > n_class)
+      n_class = keyset.size();
 
-    printf("\nTotal %d samples found with %d classes for `file://%s`:\n", samples, n_class, path.c_str());
+    printf("\nTotal %d samples found with %zd classes for `file://%s`:\n", samples, keyset.size(), path.c_str());
     die_if(!samples, "No valid samples found in directory.");
     // for (int i = 0; i < n_class; ++i)
     //   printf("  (*) class %d => %s (%zd samples)\n", i, keyset[i].c_str(), dict[keyset[i]].size());
 
+    threadStop = false;
+    workers.resize(thread_para);
     __sync_add_and_fetch(&activeThread, workers.size());
     for (int i = 0; i < workers.size(); ++i) {
       pthread_mutex_init(&workers[i].m_lock, 0);
@@ -208,6 +211,13 @@ public:
   }
 
   vector<Tensor> next_batch() {
+    vector<Tensor> dataset = {
+      Tensor({batch_size, channel, height, width}),
+      Tensor({batch_size, n_class})
+    };
+    if (!dict.size())
+      return move(dataset);
+
     size_t split = batch_size * channel * height * width, tail = split + batch_size * n_class;
 
     int i = next_iter;
@@ -226,10 +236,6 @@ public:
       break;
     }
 
-    vector<Tensor> dataset = {
-      Tensor({batch_size, channel, height, width}),
-      Tensor({batch_size, n_class})
-    };
     dataset[0].set_data(hostPtr, false);
     dataset[1].set_data(hostPtr + split, true);
 

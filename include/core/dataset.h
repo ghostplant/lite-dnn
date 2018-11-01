@@ -7,6 +7,9 @@ bool is_standard_name(const string &name) {
 }
 
 auto load_images(const string &images, string cache_path = "/tmp/dataset") {
+  if (images == "")
+    return pair<string, string>({"", ""});
+
   // images: cifar10 / mnist / catsdogs
   if (cache_path.back() != '/')
     cache_path += "/";
