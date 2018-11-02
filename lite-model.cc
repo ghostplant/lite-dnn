@@ -96,15 +96,15 @@ int main(int argc, char **argv) {
     ensure(save_frequency % metric_frequency == 0);
 
     if (k % metric_frequency == 0 || k == 1) {
-      auto lacc = predicts.get_loss_and_accuracy_with(batch_data[1]);
+      auto lacc = predicts.compute_loss_and_accuracy(batch_data[1]);
 
       val_gen->recycleBuffer();
       auto val_batch_data = val_gen->next_batch();
       auto val_predicts = model->predict({{"image_place_0", val_batch_data[0]}});
-      auto val_lacc = val_predicts.get_loss_and_accuracy_with(val_batch_data[1]);
+      auto val_lacc = val_predicts.compute_loss_and_accuracy(val_batch_data[1]);
       double during = (get_microseconds() - lastClock) * 1e-6f;
-      printf("==> [GPU-%d] step = %d (batch = %d; %.2lf images/sec): loss = %.4f, acc = %.2f%%, val_loss = %.4f, val_acc = %.2f%%, during = %.2fs\n",
-        mpi_rank, k, batch_size, (k - last_k) * batch_size / during, lacc.first, lacc.second, val_lacc.first, val_lacc.second, during);
+      printf("==> [GPU-%d] step = %d (%.2lf images/s): loss = %.4f, top1 = %.2f%%, top5 = %.2f%%, v_loss = %.4f, v_top1 = %.2f%%, v_top5 = %.2f%%, during = %.2fs\n",
+        mpi_rank, k, (k - last_k) * batch_size / during, lacc["loss"], lacc["top_1_acc"], lacc["top_5_acc"], val_lacc["loss"], val_lacc["top_1_acc"], val_lacc["top_5_acc"], during);
 
       if (k % save_frequency == 0 || k == steps) {
         if (mpi_rank == 0) {

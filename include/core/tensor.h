@@ -364,33 +364,41 @@ public:
     return left;
   }
 
-  pair<float, float> get_loss_and_accuracy_with(const Tensor &data_label) {
-    const Tensor &data_pred = *this;
-    ensure(data_pred.shape.size() == 2 && data_pred.shape == data_label.shape);
+  unordered_map<string, float> compute_loss_and_accuracy(const Tensor &labels) {
+    const Tensor &logits = *this;
+    ensure(logits.shape.size() == 2 && logits.shape == labels.shape);
 
-    vector<float> pred_data = data_pred.clip_by_value(1.0e-7f, 1.0f - 1.0e-7f).get_data();
-    vector<float> real_data = data_label.get_data();
+    vector<float> logit_data = logits.clip_by_value(1.0e-7f, 1.0f - 1.0e-7f).get_data();
+    vector<float> label_data = labels.get_data();
 
     float loss = 0.0f;
-    for (int i = 0; i < pred_data.size(); ++i) {
-      loss -= real_data[i] * log(pred_data[i]) + (1.0f - real_data[i]) * log(1.0f - pred_data[i]);
+    for (int i = 0; i < logit_data.size(); ++i) {
+      loss -= label_data[i] * log(logit_data[i]) + (1.0f - label_data[i]) * log(1.0f - logit_data[i]);
     }
-    loss /= data_pred.shape[0];
+    loss /= logits.shape[0];
 
-    int tot = 0, acc = 0;
-    for (int i = 0; i < data_pred.shape[0]; ++i) {
+    int tot = 0, acc1 = 0, acc5 = 0;
+    for (int i = 0; i < logits.shape[0]; ++i) {
       int it = 0, jt = 0;
-      for (int j = 1; j < data_pred.shape[1]; ++j) {
-        if (pred_data[i * data_pred.shape[1] + it] < pred_data[i * data_pred.shape[1] + j])
-          it = j;
-        if (real_data[i * data_pred.shape[1] + jt] < real_data[i * data_pred.shape[1] + j])
+      for (int j = 1; j < logits.shape[1]; ++j) {
+        if (label_data[i * logits.shape[1] + jt] < label_data[i * logits.shape[1] + j])
           jt = j;
       }
+      for (int j = 0; j < logits.shape[1]; ++j) {
+        if (logit_data[i * logits.shape[1] + jt] <= logit_data[i * logits.shape[1] + j])
+          ++it;
+      }
       ++tot;
-      if (it == jt)
-        ++acc;
+      if (it <= 1)
+        ++acc1;
+      if (it <= 5)
+        ++acc5;
     }
-    return {loss, acc * 100.0f / tot};
+    return {
+      {"loss", loss},
+      {"top_1_acc", acc1 * 100.0f / tot},
+      {"top_5_acc", acc5 * 100.0f / tot},
+    };
   }
 
   shared_ptr<DeviceMemory> d_data;
