@@ -62,11 +62,11 @@ int main(int argc, char **argv) {
   int batch_size = 64, steps = 50000;
 
   printf("Creating generator for GPU-%d ..\n", mpi_rank);
-  auto dataset = load_images("cifar10");
+  auto dataset = load_images("flowers");
   auto gen = make_shared<ImageDataGenerator>(224, 224, batch_size, dataset.first, 4, true);
   auto val_gen = make_shared<ImageDataGenerator>(224, 224, batch_size, dataset.second, 1, false);
 
-  auto model = lite_dnn::apps::imagenet_resnet50v1::create_model(
+  auto model = lite_dnn::apps::imagenet_alexnet::create_model(
     "image_place_0", "label_place_0", {gen->channel, gen->height, gen->width}, gen->n_class);
   auto optimizor = make_shared<MomentumOptimizor>(model, 0.9f, 0.001f, 0.001f);
   // auto optimizor = make_shared<SGDOptimizor>(model, 0.001f, 0.001f);
