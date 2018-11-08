@@ -1,6 +1,12 @@
 #ifndef __LITEDNN_TENSOR__
 #define __LITEDNN_TENSOR__
 
+#include <cuda.h>
+#include <cublas_v2.h>
+#include <cudnn_v7.h>
+#include <nccl.h>
+#include <mpi.h>
+
 #include <vector>
 #include <memory>
 #include <unordered_map>

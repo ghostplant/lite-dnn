@@ -21,12 +21,6 @@
 #include <unistd.h>
 #include <sys/time.h>
 
-#include <cuda.h>
-#include <cublas_v2.h>
-#include <cudnn_v7.h>
-#include <nccl.h>
-#include <mpi.h>
-
 #include <core/tensor.h>
 #include <core/layers.h>
 #include <core/model.h>
