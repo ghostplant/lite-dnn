@@ -26,13 +26,13 @@ namespace lite_dnn {
         ->then(make_shared<LRN>(4, 1.0, 0.001 / 9.0, 0.75))
         ->then(make_shared<Pooling>(3, 2, CUDNN_POOLING_MAX))
         ->then(make_shared<Flatten>())
-        ->then(make_shared<Dense>(4096))
+        ->then(CreateLayer(Dense({.channels = 4096})))
         ->then(make_shared<Activation>(CUDNN_ACTIVATION_RELU))
         ->then(make_shared<Dropout>(0.25))
-        ->then(make_shared<Dense>(4096))
+        ->then(CreateLayer(Dense({.channels = 4096})))
         ->then(make_shared<Activation>(CUDNN_ACTIVATION_RELU))
         ->then(make_shared<Dropout>(0.25))
-        ->then(make_shared<Dense>(n_class))
+        ->then(CreateLayer(Dense({.channels = n_class})))
         ->then(make_shared<SoftmaxCrossEntropy>(label_ph));
 
       return top_layer->compile();
@@ -55,11 +55,11 @@ namespace lite_dnn {
         ->then(make_shared<LRN>(4, 1.0, 0.001 / 9.0, 0.75))
         ->then(make_shared<Pooling>(3, 2, CUDNN_POOLING_MAX))
         ->then(make_shared<Flatten>())
-        ->then(make_shared<Dense>(384))
+        ->then(CreateLayer(Dense({.channels = 384})))
         ->then(make_shared<Activation>(CUDNN_ACTIVATION_RELU))
-        ->then(make_shared<Dense>(192))
+        ->then(CreateLayer(Dense({.channels = 192})))
         ->then(make_shared<Activation>(CUDNN_ACTIVATION_RELU))
-        ->then(make_shared<Dense>(n_class))
+        ->then(CreateLayer(Dense({.channels = n_class})))
         ->then(make_shared<SoftmaxCrossEntropy>(label_ph));
 
       return top_layer->compile();

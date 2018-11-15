@@ -1,6 +1,8 @@
 #ifndef __LITEDNN_LAYERS__
 #define __LITEDNN_LAYERS__
 
+#define CreateLayer(layer)   (shared_ptr<decltype(layer)>(new layer))
+
 class Model;
 
 
@@ -393,18 +395,21 @@ class Dense: public Layer {
 
 public:
   Tensor w, bias, ones;
-  int channels;
 
-  Dense(int channels, int max_batch = 1024): channels(channels), ones({max_batch, 1}, 1.0f), w(), bias() {
+  struct properties {
+    int channels;
+  } _prop;
+
+  Dense(const struct properties &prop): _prop(prop), ones({1024 * 1024, 1}, 1.0f), w(), bias() {
   }
 
   vector<int> get_output_shape() {
     if (w.count() < 1) {
       ensure(input_shape.size() == 2);
-      w = Tensor({input_shape[1], channels}, true);
-      bias = Tensor({1, channels}, 0.0f);
+      w = Tensor({input_shape[1], _prop.channels}, true);
+      bias = Tensor({1, _prop.channels}, 0.0f);
     }
-    return {input_shape[0], channels};
+    return {input_shape[0], _prop.channels};
   }
 
   string to_string() const {

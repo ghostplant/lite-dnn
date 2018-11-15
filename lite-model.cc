@@ -29,7 +29,7 @@
 #include <core/generator.h>
 #include <core/dataset.h>
 
-#include <apps/resnet50.h>
+// #include <apps/resnet50.h>
 #include <apps/alexnet.h>
 
 static inline unsigned long get_microseconds() {
