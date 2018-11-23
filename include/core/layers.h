@@ -52,9 +52,9 @@ public:
 class InputLayer: public Layer {
 
 public:
-  string place_holder;
+  string input;
 
-  InputLayer(const string &place_holder, int channel, int height = -1, int width = -1): place_holder(place_holder) {
+  InputLayer(const string &input, int channel, int height = -1, int width = -1): input(input) {
     if (height > 0 && width > 0)
       input_shape = {-1, channel, height, width};
     else
@@ -70,8 +70,8 @@ public:
   }
 
   Tensor forward(const vector<Tensor> &xs, const unordered_map<string, Tensor> &feed_dict) {
-    auto it = feed_dict.find(place_holder);
-    die_if(it == feed_dict.end(), "Cannot find item `%s` in feed_dict.", place_holder.c_str());
+    auto it = feed_dict.find(input);
+    die_if(it == feed_dict.end(), "Cannot find item `%s` in feed_dict.", input.c_str());
 
     auto x_shape = it->second.shape;
     x_shape[0] = -1;
@@ -127,9 +127,9 @@ public:
 class SoftmaxCrossEntropy: public Layer {
 
 public:
-  string place_holder;
+  string label;
 
-  SoftmaxCrossEntropy(const string &place_holder): place_holder(place_holder) {
+  SoftmaxCrossEntropy(const string &label): label(label) {
   }
 
   ~SoftmaxCrossEntropy() {
@@ -151,8 +151,8 @@ public:
 
   vector<Tensor> backward(const Tensor &dy, const unordered_map<string, Tensor> &feed_dict) {
     const Tensor &y = cacheTensors[0];
-    auto it = feed_dict.find(place_holder);
-    die_if(it == feed_dict.end(), "Cannot find item `%s` in feed_dict.", place_holder.c_str());
+    auto it = feed_dict.find(label);
+    die_if(it == feed_dict.end(), "Cannot find item `%s` in feed_dict.", label.c_str());
     const Tensor &_dy = it->second;
 
     ensure(_dy.shape == y.shape);
@@ -312,7 +312,7 @@ class Dropout: public Layer {
   uint64_t seed; float drop_prob;
 
 public:
-  Dropout(float drop_prob = 0.1f, uint64_t seed = 10): reversed_size(~0LU), seed(seed), drop_prob(drop_prob) {
+  Dropout(float drop_prob = 0.1f, uint64_t seed = 1): reversed_size(~0LU), seed(seed), drop_prob(drop_prob) {
     ensure(CUDNN_STATUS_SUCCESS == cudnnCreateDropoutDescriptor(&dropDesc));
     ensure(CUDNN_STATUS_SUCCESS == cudnnDropoutGetStatesSize(devices[currentDev].hCudnn, &states_size));
 
@@ -395,21 +395,18 @@ class Dense: public Layer {
 
 public:
   Tensor w, bias, ones;
+  int channels;
 
-  struct properties {
-    int channels;
-  } _prop;
-
-  Dense(const struct properties &prop): _prop(prop), ones({1024 * 1024, 1}, 1.0f), w(), bias() {
+  Dense(int channels): channels(channels), ones({1024 * 1024, 1}, 1.0f), w(), bias() {
   }
 
   vector<int> get_output_shape() {
     if (w.count() < 1) {
       ensure(input_shape.size() == 2);
-      w = Tensor({input_shape[1], _prop.channels}, true);
-      bias = Tensor({1, _prop.channels}, 0.0f);
+      w = Tensor({input_shape[1], channels}, true);
+      bias = Tensor({1, channels}, 0.0f);
     }
-    return {input_shape[0], _prop.channels};
+    return {input_shape[0], channels};
   }
 
   string to_string() const {
