@@ -86,6 +86,7 @@ public:
     if (fp != nullptr)
       fclose(fp);
     printf("  [@] Loading weights data: %s.\n\n", success ? "YES" : "NO");
+    return success;
   }
 
   bool save_weights_to_file(const char *weight_path) {
@@ -111,6 +112,7 @@ public:
     if (fp != nullptr)
       fclose(fp);
     printf("  [@] Saving weights data: %s.\n\n", success ? "YES" : "NO");
+    return success;
   }
 
   Tensor predict(const unordered_map<string, Tensor> &feed_dict = {}) {
