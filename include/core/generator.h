@@ -1,9 +1,12 @@
 #include <dirent.h>
 #include <sys/stat.h>
+#include <queue>
+
+#ifndef TEST_ONLY
 #include <opencv2/core/core.hpp>
 #include <opencv2/highgui/highgui.hpp>
 #include <opencv2/imgproc/imgproc.hpp>
-#include <queue>
+#endif
 
 
 class MemoryManager {
@@ -273,6 +276,7 @@ public:
   }
 
   bool get_image_data(const string &image_path, float *chw, int one_hot, float *l, unsigned int &seed) {
+#ifndef TEST_ONLY
     cv::Mat image = cv::imread(image_path, 1);
     if (image.data == nullptr)
       return false;
@@ -296,6 +300,11 @@ public:
         *r++ = *ptr++ / 255.0f, *g++ = *ptr++ / 255.0f, *b++ = *ptr++ / 255.0f;
       }
     }
+#else
+    for (int i = height * width * 3 - 1; i >= 0; --i)
+      chw[i] = 0.5f;
+	l[one_hot] = 1.0f;
+#endif
     return true;
   }
 };

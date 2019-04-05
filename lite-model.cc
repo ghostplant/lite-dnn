@@ -41,22 +41,43 @@ static inline unsigned long get_microseconds() {
 
 int main(int argc, char **argv) {
   Tensor::init();
-
   /* 
-  auto model = make_shared<InputLayer>("image_place_0", gen->channel, gen->height, gen->width)
-    ->then(make_shared<Flatten>())
-    ->then(make_shared<Dense>(512))
-    ->then(make_shared<Activation>(CUDNN_ACTIVATION_RELU))
-    ->then(make_shared<Dense>(512))
-    ->then(make_shared<Activation>(CUDNN_ACTIVATION_RELU))
-    ->then(make_shared<Dense>(gen->n_class))
-    ->then(make_shared<SoftmaxCrossEntropy>("label_place_0"))
-    ->compile(); */
+  {
+    cudaDeviceProp prop;
+    cudaGetDeviceProperties(&prop, 0);
+    printf("thread_props = %d %d %d | %d %d %d;\n", prop.maxThreadsDim[0], prop.maxThreadsDim[1], prop.maxThreadsDim[2], prop.maxGridSize[0], prop.maxGridSize[1], prop.maxGridSize[2]);
+
+    auto model = make_shared<InputLayer>("image_place_0", 1, 28, 28)
+      ->then(CreateLayer(Convolution({.filters = 96, .kernel_size = 3, .stride = 1, .padding = 1, .use_bias = false})))
+      ->then(make_shared<Pooling>(2, 2))
+      ->then(make_shared<Flatten>())
+      ->then(make_shared<Dense>(512))
+      ->then(make_shared<Activation>(CUDNN_ACTIVATION_RELU))
+      ->then(make_shared<Dense>(512))
+      ->then(make_shared<Activation>(CUDNN_ACTIVATION_RELU))
+      ->then(make_shared<Dense>(10))
+      ->then(make_shared<SoftmaxCrossEntropy>("label_place_0"))
+      ->compile();
+
+	auto optimizor = make_shared<SGDOptimizor>(model, 0.001f, 0.001f);
+    vector<Tensor> batch_data = {Tensor({32, 1, 28, 28}, true), Tensor({32, 10}, true)};
+
+	unordered_map<string, Tensor> feed_dict = {{"image_place_0", batch_data[0]}, {"label_place_0", batch_data[1]}};
+	auto predicts = model->predict(feed_dict);
+    auto loss = predicts.compute_loss_and_accuracy(batch_data[1])["loss"];
+	auto out = predicts.get_data();
+    auto grad = model->collect_all_gradients(feed_dict);
+    optimizor->apply_updates(grad);
+
+    Tensor::quit();
+	return 0;
+  }
+//  */
 
   int batch_size = 64, steps = 50000;
 
   printf("Creating generator for GPU-%d ..\n", mpi_rank);
-  auto dataset = load_images("flowers");
+  auto dataset = load_images("mnist");
   auto gen = make_shared<ImageDataGenerator>(224, 224, batch_size, dataset.first, 4, true);
   auto val_gen = make_shared<ImageDataGenerator>(224, 224, batch_size, dataset.second, 1, false);
 
@@ -106,7 +127,9 @@ int main(int argc, char **argv) {
           model->save_weights_to_file("weights.lw");
           Tensor::synchronizeCurrentDevice();
         }
+#ifdef USING_MULTI_GPU
         MPI_Barrier(MPI_COMM_WORLD);
+#endif
       }
       lastClock = get_microseconds(), last_k = k;
     }

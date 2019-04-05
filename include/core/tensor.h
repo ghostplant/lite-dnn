@@ -4,8 +4,11 @@
 #include <cuda.h>
 #include <cublas_v2.h>
 #include <cudnn_v7.h>
+
+#ifdef USING_MULTI_GPU
 #include <nccl.h>
 #include <mpi.h>
+#endif
 
 #include <vector>
 #include <memory>
@@ -44,7 +47,9 @@ static volatile int activeThread = 0;
 
 
 static int mpi_size, mpi_rank, mpi_localrank;
+#ifdef USING_MULTI_GPU
 static ncclComm_t comm;
+#endif
 
 class Tensor {
 
@@ -52,6 +57,7 @@ public:
   // Global Tensor Funtions
 
   static void init() {
+#ifdef USING_MULTI_GPU
     ensure(MPI_SUCCESS == MPI_Init(0, 0));
     MPI_Comm_size(MPI_COMM_WORLD, &mpi_size);
     MPI_Comm_rank(MPI_COMM_WORLD, &mpi_rank);
@@ -59,6 +65,10 @@ public:
     const char *localrank = getenv("OMPI_COMM_WORLD_LOCAL_RANK");
     die_if(mpi_size > 1 && localrank == nullptr, "Only OpenMPI is supported for this application.");
     mpi_localrank = localrank ? atoi(localrank) : 0;
+#else
+    mpi_size = 1;
+    mpi_localrank = 0;
+#endif
 
     int devCount = 0;
     ensure(CUDA_SUCCESS == cuInit(0));
@@ -83,6 +93,7 @@ public:
     // devices[currentDev].hCublas = devices[currentDev].hCublas;
     // devices[currentDev].hCudnn = devices[currentDev].hCudnn;
 
+#ifdef USING_MULTI_GPU
     ncclUniqueId id;
     if (mpi_rank == 0)
       ncclGetUniqueId(&id);
@@ -91,6 +102,7 @@ public:
     ensure(0 == ncclGroupStart());
     ensure(0 == ncclCommInitRank(&comm, mpi_size, id, mpi_rank));
     ensure(0 == ncclGroupEnd());
+#endif
   }
 
   static void quit(int exitCode = 0) {
@@ -98,8 +110,10 @@ public:
     while (activeThread)
       usleep(50000);
 
+#ifdef USING_MULTI_GPU
     ensure(0 == ncclCommDestroy(comm));
     MPI_Finalize();
+#endif
     exit(exitCode);
   }
 
@@ -223,6 +237,8 @@ public:
     ensure(CUDA_SUCCESS == cuMemsetD32Async((CUdeviceptr)d_data->get(), ui, len, devices[currentDev].hStream));
   }
 
+  // ~Tensor() { }
+
 
   size_t setup_tensor(const vector<int> &shape) {
     this->shape = shape;
@@ -300,11 +316,13 @@ public:
                             (float*)A->d_data->get(), A->shape[1],  // X
                             (float*)B->d_data->get(), B->shape[1],  // Y
                             &beta, (float*)ans.d_data->get(), ans.shape[1]));  // Z
-    return ans;
+    return move(ans);
   }
 
   void allreduce() const {
+#ifdef USING_MULTI_GPU
     ensure(0 == ncclAllReduce((const void*)this->d_data->get(), (void*)this->d_data->get(), this->count(), ncclFloat, ncclSum, comm, devices[currentDev].hStream));
+#endif
   }
 
   double energy() const {
@@ -315,15 +333,16 @@ public:
     return ans;
   }
 
-  Tensor self_update(const Tensor &that, float alpha = 1.0f, float beta = 0.0f) const {
+  Tensor self_update(const Tensor &that, float alpha = 1.0f, float selfAlpha = 0.0f) const {
+	// self = selfAlpha * self + alpha * &that;
     if (fabs(alpha) < 1e-7f) {
-      ensure(CUBLAS_STATUS_SUCCESS == cublasSscal(devices[currentDev].hCublas, count(), &beta, (float*)this->d_data->get(), 1));
+      ensure(CUBLAS_STATUS_SUCCESS == cublasSscal(devices[currentDev].hCublas, count(), &selfAlpha, (float*)this->d_data->get(), 1));
       return *this;
     }
     ensure(this->shape == that.shape);
     ensure(CUDNN_STATUS_SUCCESS == cudnnTransformTensor(devices[currentDev].hCudnn,
         &alpha, that.dataTensor->get(), (float*)that.d_data->get(),
-        &beta, this->dataTensor->get(), (float*)this->d_data->get()));
+        &selfAlpha, this->dataTensor->get(), (float*)this->d_data->get()));
     return *this;
   }
 
@@ -372,7 +391,8 @@ public:
 
   unordered_map<string, float> compute_loss_and_accuracy(const Tensor &labels) {
     const Tensor &logits = *this;
-    ensure(logits.shape.size() == 2 && logits.shape == labels.shape);
+    ensure(logits.shape.size() == 2);
+    ensure(logits.shape == labels.shape);
 
     vector<float> logit_data = logits.clip_by_value(1.0e-7f, 1.0f - 1.0e-7f).get_data();
     vector<float> label_data = labels.get_data();
