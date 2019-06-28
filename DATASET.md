@@ -8,4 +8,6 @@ e.g.
 
 3) auto ds = load_images("mnist"); // ds.first: training set, ds.second: validation set
 
+4) auto ds = load_images("flowers"); // ds.first: training set, ds.second: validation set
+
 ```
