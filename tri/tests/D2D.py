@@ -16,14 +16,15 @@ except:
 torch.manual_seed(0)
 
 size = 1024 * 1024 * int(os.environ.get('MB', 32))
+x = torch.rand(size // 4, device='cpu').to(DEVICE)
 y = torch.rand(size // 4, device='cpu').to(DEVICE)
 
 while True:
   steps = 10
   t0 = time.perf_counter()
   for i in range(steps):
-    z = y.clone()
+    z = torch.add(x, y)
   z.view(-1)[0].item()
   t1 = time.perf_counter()
-  cost_us = (t1 - t0) / steps * 1e6
+  cost_us = (t1 - t0) / steps * 1e6 * 2 / 3
   print('DtoD', cost_us)
