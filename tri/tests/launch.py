@@ -21,7 +21,7 @@ while True:
   steps = 100000
   t0 = time.perf_counter()
   for i in range(steps):
-    z = y.clone()
+    z = torch.log(y)
   z.view(-1)[0].item()
   t1 = time.perf_counter()
   cost_us = (t1 - t0) / steps * 1e6

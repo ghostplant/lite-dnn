@@ -18,6 +18,9 @@ torch.manual_seed(0)
 size = 1024 * 1024 * int(os.environ.get('MB', 32))
 y = torch.rand(size // 4, device='cpu')
 
+if DEVICE.type == 'cuda':
+  y = y.pin_memory()
+
 while True:
   steps = 10
   t0 = time.perf_counter()
