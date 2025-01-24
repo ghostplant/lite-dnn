@@ -16,6 +16,8 @@ except:
 torch.manual_seed(0)
 
 size = 1024 * 1024 * int(os.environ.get('MB', 32))
+if size == 0:
+    size = 4
 y = torch.rand(size // 4, device='cpu').to(DEVICE)
 
 while True:
