@@ -21,10 +21,10 @@ if size == 0:
 y = torch.rand(size // 4, device='cpu').to(DEVICE)
 
 while True:
-  steps = 10
+  steps = 50
   t0 = time.perf_counter()
   for i in range(steps):
-    z = y.cpu()
+    z = y.to('cpu', non_blocking=True)
   z.view(-1)[0].item()
   t1 = time.perf_counter()
   cost_us = (t1 - t0) / steps * 1e6
