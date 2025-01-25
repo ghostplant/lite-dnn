@@ -34,7 +34,7 @@ def triton_fn(x):
     triton_kernel[(x.size(0),)](x, output, x.size(0), x.size(1))
     return output
 
-def eval(fn):
+def eval(fn,  ctx):
   costs = []
   for i in range(10):
     steps = 100
@@ -45,26 +45,27 @@ def eval(fn):
     t1 = time.perf_counter()
     cost_us = (t1 - t0) / steps * 1e6
     costs += [cost_us]
-  print(f'Operator, cost_us = {sorted(costs)[len(costs) // 2]:.2f}')
+  print(f'Operator ({ctx}), cost_us = {sorted(costs)[len(costs) // 2]:.2f}')
 
 
 torch.manual_seed(0)
-x = torch.rand([4096, 4096], device=DEVICE)
+x = torch.rand([11008, 4096]).to(device=DEVICE)
 output_torch = torch.sum(x, dim=1)
 output_triton = triton_fn(x)
 print(output_torch.cpu())
 print(output_triton.cpu())
+diff = torch.max(torch.abs(output_torch - output_triton))
 print(f'The maximum difference between torch and triton is '
-      f'{torch.max(torch.abs(output_torch - output_triton))}')
+      f'{diff}')
+assert diff < 1e-3
 
-eval(lambda: torch.sum(x, dim=1))
-eval(lambda: triton_fn(x))
+eval(lambda: torch.sum(x, dim=1), 'Torch')
+eval(lambda: triton_fn(x), 'Triton')
 
 if DEVICE.type == 'cuda':
     import autort
     try:
       fn = autort.export(ir='reduce_sum_f32[N] +=! a[N, M]', inputs=[f'a=float32[N:{x.size(0)},M:{x.size(1)}]'], config='tune:50')
-      autort.perform(lambda: fn(x), text='AutoRT')
-      eval(lambda: fn(x))
+      eval(lambda: fn(x), 'AutoRT')
     except:
       pass
