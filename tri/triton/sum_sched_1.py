@@ -1,19 +1,19 @@
 import torch
-import triton
-import triton.language as tl
-import os, time
-torch.manual_seed(0)
+import triton, triton.language as tl
+import os, sys
+import time
 
 try:
   import torch_maia
   import maia_athena
-
   port = int(os.environ.get('PORT', 0))
   torch_maia.load_firmware(port)
-  maia_athena.get_nepal_device(port).set_global_hbm_limit(int(1024 * 1024 * 1024 * 4))
+  maia_athena.get_nepal_device(port).set_global_hbm_limit(int(1024 * 1024 * 1024 * 40))
   DEVICE = torch.device(f'maia:{port}')
 except:
   DEVICE = torch.device('cuda')
+
+torch.manual_seed(0)
 
 @triton.jit
 def triton_kernel(
