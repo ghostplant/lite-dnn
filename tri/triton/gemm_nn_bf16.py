@@ -141,6 +141,19 @@ def matmul(a, b, activation=""):
     )
     return c
 
+def eval(fn,  ctx=''):
+  costs = []
+  for i in range(10):
+    steps = 100
+    t0 = time.perf_counter()
+    for i in range(steps):
+      z = fn()
+    z.view(-1)[0].item()
+    t1 = time.perf_counter()
+    cost_us = (t1 - t0) / steps * 1e6
+    costs += [cost_us]
+  print(f'Operator ({ctx}), cost_us = {sorted(costs)[len(costs) // 2]:.2f}')
+
 if __name__ == "__main__":
     a = torch.randn((512, 512), device=DEVICE, dtype=torch.bfloat16)
     b = torch.randn((512, 512), device=DEVICE, dtype=torch.bfloat16)
@@ -153,32 +166,5 @@ if __name__ == "__main__":
     rtol = 1e-2
     assert torch.allclose(triton_output, torch_output, atol=1e-2, rtol=rtol)
 
-exit(0)
-
-import os
-a = torch.randn((int(os.environ.get('B', 4096)), 4096), device=DEVICE, dtype=torch.bfloat16)
-b = torch.randn((11008, 4096), device=DEVICE, dtype=torch.bfloat16)
-triton_output = matmul(a, b)
-torch_output = torch.matmul(a, b.t())
-print(f"triton_output_with_fp16_inputs={triton_output}")
-print(f"torch_output_with_fp16_inputs={torch_output}")
-# Bigger tolerance for AMD MI200 devices.
-# MI200 devices use reduced precision fp16 and bf16 and flush input and
-# output denormal values to zero. Detailed info is at: https://pytorch.org/docs/stable/notes/numerical_accuracy.html#reduced-precision-fp16-and-bf16-gemms-and-convolutions-on-amd-instinct-mi200-devices
-rtol = 1e-2 if is_hip_mi200() else 0
-if torch.allclose(triton_output, torch_output, atol=1e-2, rtol=rtol):
-    print("[V] Triton and Torch match")
-else:
-    print("[X] Triton and Torch differ")
-
-import autort
-try:
-  assert a.size(0) == 1
-  fn = autort.export(ir='gemv_f16[N] +=! (a[K] * b[N, K]).float32(); final_fp16[N] = gemv_f16[N].bfloat16()', inputs=[f'a=bfloat16[K:{a.size(1)}]', f'b=bfloat16[N:{b.size(0)},K:{a.size(1)}]'], config='tune:30')
-  autort.perform(lambda: fn(a.view(a.size(1)), b), text='AutoRT')
-except:
-  pass
-
-autort.perform(lambda: torch.matmul(a, b.t()), text='Torch')
-autort.perform(lambda: matmul(a, b), text='Triton')
-
+    eval(lambda: matmul(a, b), 'Triton')
+    eval(lambda: torch.matmul(a, b), 'Torch')

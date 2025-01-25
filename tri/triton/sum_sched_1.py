@@ -34,7 +34,7 @@ def triton_fn(x):
     triton_kernel[(x.size(0),)](x, output, x.size(0), x.size(1))
     return output
 
-def eval(fn,  ctx):
+def eval(fn,  ctx=''):
   costs = []
   for i in range(10):
     steps = 100
