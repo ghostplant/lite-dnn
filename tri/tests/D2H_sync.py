@@ -20,17 +20,12 @@ if size == 0:
     size = 4
 y = torch.rand(size // 4, device='cpu').to(DEVICE)
 
-is_cuda = (DEVICE.type == 'cuda')
-
 while True:
   steps = 50
   t0 = time.perf_counter()
   for i in range(steps):
-    z = y.to('cpu', non_blocking=is_cuda)
-  if is_cuda:
-    torch.cuda.synchronize()
-  else:
-    z.view(-1)[0].item()
+    z = y.to('cpu')
+  z.view(-1)[0].item()
   t1 = time.perf_counter()
   cost_us = (t1 - t0) / steps * 1e6
   print('DtoH', cost_us)
