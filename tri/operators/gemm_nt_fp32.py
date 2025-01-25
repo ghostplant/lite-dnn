@@ -18,8 +18,8 @@ torch.manual_seed(0)
 M, K = int(os.environ.get('M', 11008)), int(os.environ.get('K', 4096))
 
 def test(batch):
-  x = torch.rand([batch, K], dtype=torch.bfloat16, device='cpu').to(DEVICE)
-  y = torch.rand([M, K], dtype=torch.bfloat16, device='cpu').to(DEVICE)
+  x = torch.rand([batch, K], dtype=torch.float32, device='cpu').to(DEVICE)
+  y = torch.rand([M, K], dtype=torch.float32, device='cpu').to(DEVICE)
 
   costs = []
   for i in range(10):
@@ -32,7 +32,7 @@ def test(batch):
     cost_s = (t1 - t0) / steps
     costs += [cost_s]
   sc = sorted(costs)[len(costs) // 2]
-  print(f'Operator (batch, M, K={batch}, {M}, {K}), cost_s = {sc * 1e6:.2f}, mem = {(x.numel() + y.numel() + batch * M) * 2 * 1e-9 / sc:.2f} GB/s, perf = {(x.numel() * M * 2) * 1e-12 / sc:.4f} TFlops')
+  print(f'Operator (batch, M, K={batch}, {M}, {K}), cost_s = {sc * 1e6:.2f}, mem = {(x.numel() + y.numel() + batch * M) * 4 * 1e-9 / sc:.2f} GB/s, perf = {(x.numel() * M * 2) * 1e-12 / sc:.4f} TFlops')
 
 for s in [1, 4, 4096, 1024 * 16]:
   test(s)
