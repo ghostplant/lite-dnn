@@ -28,7 +28,7 @@ def test(size_mb):
       z = torch.add(x, y)
     z.view(-1)[0].item()
     t1 = time.perf_counter()
-    cost_us = (t1 - t0) / steps * 1e6 * 2 / 3
+    cost_us = (t1 - t0) / steps * 1e6
     costs += [cost_us]
   print(f'Operator (size_mb={size_mb}), cost_us = {sorted(costs)[len(costs) // 2]:.2f}')
 
