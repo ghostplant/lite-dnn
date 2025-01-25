@@ -12,6 +12,7 @@ try:
   DEVICE = torch.device(f'maia:{port}')
 except:
   DEVICE = torch.device('cuda')
+  # torch.backends.cuda.matmul.allow_tf32 = True
 
 torch.manual_seed(0)
 
